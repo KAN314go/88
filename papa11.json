@@ -587,7 +587,7 @@
 "免嗅":"0",
 "嗅探词":".m3u8#.mp4#.flv#.m4a#.avi#.mkv#.mov#.3gp#.asf#.rm#.rmvb#.wmv#.mpg#.mpeg#.mpe#.ts#.vob#.mp3#.wma"
 },"jar":"https://8415.kstore.space/Tvbox/jar/h.jar"},
-{"key":"天美","name":"🔞天美|doll","type":3,"api":"csp_XBPQ","jar":"./lib/XBPQ.jar","style":{"ratio":1.7},
+{"key":"天美","name":"🔞天美|doll","type":3,"api":"csp_XBPQ","style":{"ratio":1.7},
             "ext": {
                                 "搜索链接":"http://www.xbyc.cc/index.php/vod/search/page/{pg}/wd/{wd}.html",
         "数组":"\"box-item\"&&</em>",
@@ -595,8 +595,8 @@
                 "分类数组":"<li>&&</li>",
                 "分类标题":"\">&&</a",
                 "分类ID":"id/&&.",
-        "分类链接":"http://www.xbyc.cc/index.php/vod/type/id/{cateId}/page/{catePg}.html;mz"
-            }
+        "分类链接":"http://www.xbyc.cc/index.php/vod/type/id/{cateId}/page/{catePg}.html;;mz"
+            },"jar":"https://8415.kstore.space/Tvbox/jar/h.jar"
         },
 //{"key":"csp_Miss","name":"👠Miss AV 墙外〔SP〕","type":3,"api":"csp_Miss","searchable":1,"quickSearch":1,"filterable":1},
 
