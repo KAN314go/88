@@ -1,6 +1,6 @@
 {
 
-"spider": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/pg.jar",
+"spider": "https://8415.kstore.space/Tvbox/jar/papapg.jar",
 "sites":[
 {"key":"飞速资源","name":"飞速资源(切)","type":1,"api":"https://www.feisuzy.com/api.php/provide/vod/","searchable":1,"quickSearch":1},
 {"key":"易看资源","name":"易看资源(切)","type":1,"api":"https://api.yikanapi.com/api.php/provide/vod/","searchable":1,"quickSearch":1},
