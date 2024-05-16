@@ -655,7 +655,7 @@
 {"key": "Hanime","name": "🔞Hanime","type": 3,"api": "csp_Hanime","searchable": 1,"filterable": 1,"jar":"https://d.kstore.space/download/8415/Tvbox/jar/custom_spider%20%EF%BC%88papa-Hanme%EF%BC%89.jar"},
 //{"key":"LY","name":"猎奇🈲","type":0,"api":"http://cjmygzy.com/inc/sapi.php?ac=videolist","searchable":1,"quickSearch":1,"filterable":0},
 {"key":"*蛋蛋视频","name":"🔞蛋蛋视频","type":1,"api":"https://156.249.29.8/inc/apijson_vod.php","searchable":0,"quickSearch":0},
-{"key": "森林采集","name": "🔞森林采集1","type": 1,"api": "https://slapibf.com/api.php/provide/vod/at/xml/","searchable":1,"quickSearch":1,"filterable":0,"jar":https://8415.kstore.space/Tvbox/jar/h.jar},
+//{"key": "森林采集","name": "🔞森林采集1","type": 1,"api": "https://slapibf.com/api.php/provide/vod/at/xml/","searchable":1,"quickSearch":1,"filterable":0,"jar":https://8415.kstore.space/Tvbox/jar/h.jar},
 //{"key": "森林采集2","name": "🔞森林采集2","type": 1,"api": "https://slapibf.com/api.php/provide/vod/","searchable":1,"quickSearch":1,"filterable":0},
 {"key": "森林","name": "🔞采集.森林资源","type": 1,"api": "https://beiyong.slapibf.com/api.php/provide/vod/?ac=list","searchable": 1},
 {"key": "9号资源","name": "🔞9号资源","type": 0,"api": "http://fhapi9.com/api.php/provide/vod/at/xml/","searchable": 1,"quickSearch": 1,"filterable": 0}],
