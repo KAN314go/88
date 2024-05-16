@@ -35,7 +35,7 @@
             "timeout": 60,
             "ext": "null$$$null$$$1$$$socks5://127.0.0.1:10073"
         },
-        {"key":"u9a9","name":"🔞u9a9|磁力","type":3,"api":"csp_XBPQ","jar":"https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/lib/XBPQ.jar","style":{"type":"list"},
+        {"key":"u9a9","name":"🔞u9a9|磁力","type":3,"api":"csp_XBPQ","jar":"./lib/XBPQ.jar","style":{"type":"list"},
             "ext": {
         "搜索url":"https://u9a9b.cc/?type=1&search={wd}&p={pg}",
         "数组":"<tr&&</tr>",
@@ -70,7 +70,7 @@
                 "分类数组": "<a&&</a>",
                 "分类标题": ">&&</a>",
                 "分类ID": "/t/&&/"
-            },"jar": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/hl.jar"
+            },"jar": "./jar/hl.jar"
         },
          {
             "key": "csp_XYQHiker_777影院",
@@ -80,14 +80,14 @@
             "searchable": 1,
             "quickSearch": 1,
             "filterable": 1,
-            "ext": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/h/777影院.json","jar":"https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/xyqxbpq.jar"
+            "ext": "./h/777影院.json","jar":"./jar/xyqxbpq.jar"
         },
         {
             "key": "csp_顶级网曝",
             "name": "🔞顶级网曝",
             "type": 3,
             "api": "csp_XBPQ",
-             "jar":"https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/xyqxbpq.jar",
+             "jar":"./jar/xyqxbpq.jar",
             "playerType": 2,
             "searchable": 1,
             "quickSearch": 1,
@@ -116,7 +116,7 @@
             "name": "我爱AV社区|WO❤️AV",
             "type": 3,
             "api": "csp_XBPQ",
-            "jar":"https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/xyqxbpq.jar",
+            "jar":"./jar/xyqxbpq.jar",
             "playerType": 2,
             "searchable": 1,
             "quickSearch": 1,
@@ -139,22 +139,22 @@
             "name": "🔞疯猫av",
             "type": 3,
             "api": "csp_XBPQ",
-             "jar": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/hl.jar",
+             "jar": "./jar/hl.jar",
             "searchable": 1,
             "quickSearch": 1,
             "filterable": 0,
-            "ext": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/h/疯猫av.json"
+            "ext": "./h/疯猫av.json"
         },
         {
             "key": "csp_XBPQ_奶很大",
             "name": "🔞奶很大",
             "type": 3,
             "api": "csp_XBPQ",
-     "jar": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/hl.jar",
+     "jar": "./jar/hl.jar",
             "searchable": 1,
             "quickSearch": 1,
             "filterable": 0,
-            "ext": "https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/h/奶很大.json"
+            "ext": "./h/奶很大.json"
         },
         {
      "key": "影视",
@@ -164,7 +164,7 @@
     },  {"key": "jable",
             "name": "💃jable| XBPQ",
             "type": 3,
-            "jar":"https://gh.con.sh/https://raw.githubusercontent.com/guot55/yg/main/jar/hl.jar",
+            "jar":"./jar/hl.jar",
             "changeable": 1,
             "searchable": 1,
             "quickSearch": 1,
@@ -655,8 +655,8 @@
 {"key": "Hanime","name": "🔞Hanime","type": 3,"api": "csp_Hanime","searchable": 1,"filterable": 1,"jar":"https://d.kstore.space/download/8415/Tvbox/jar/custom_spider%20%EF%BC%88papa-Hanme%EF%BC%89.jar"},
 //{"key":"LY","name":"猎奇🈲","type":0,"api":"http://cjmygzy.com/inc/sapi.php?ac=videolist","searchable":1,"quickSearch":1,"filterable":0},
 {"key":"*蛋蛋视频","name":"🔞蛋蛋视频","type":1,"api":"https://156.249.29.8/inc/apijson_vod.php","searchable":0,"quickSearch":0},
-{"key": "森林采集","name": "🔞森林采集","type": 1,"api": "https://slapibf.com/api.php/provide/vod/at/xml/","searchable":1,"quickSearch":1,"filterable":0},
-//{"key": "森林采集2","name": "🔞森林采集","type": 1,"api": "https://slapibf.com/api.php/provide/vod/","searchable":1,"quickSearch":1,"filterable":0},
+{"key": "森林采集","name": "🔞森林采集1","type": 1,"api": "https://slapibf.com/api.php/provide/vod/at/xml/","searchable":1,"quickSearch":1,"filterable":0,"jar":https://8415.kstore.space/Tvbox/jar/h.jar},
+//{"key": "森林采集2","name": "🔞森林采集2","type": 1,"api": "https://slapibf.com/api.php/provide/vod/","searchable":1,"quickSearch":1,"filterable":0},
 {"key": "森林","name": "🔞采集.森林资源","type": 1,"api": "https://beiyong.slapibf.com/api.php/provide/vod/?ac=list","searchable": 1},
 {"key": "9号资源","name": "🔞9号资源","type": 0,"api": "http://fhapi9.com/api.php/provide/vod/at/xml/","searchable": 1,"quickSearch": 1,"filterable": 0}],
 
