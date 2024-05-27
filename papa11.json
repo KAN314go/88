@@ -7,6 +7,7 @@
 {"key":"红牛资源","name":"红牛资源(切)","type":1,"api":"https://www.hongniuzy2.com/api.php/provide/vod/","searchable":1,"quickSearch":1},
 {"key":"快车资源","name":"快车资源(切)","type":1,"api":"https://caiji.kczyapi.com/api.php/provide/vod/","searchable":1,"quickSearch":1},
 {"key":"1080资源库","name":"1080资源库(切)","type":1,"api":"https://api.1080zyku.com/inc/api_mac10.php","searchable":0,"quickSearch":0},
+{"key":"csp_xBPQ-四虎","name":"🏆四虎","type":3,"api":"csp_xBPQ","searchable":1,"quickSearch":1,"filterable":0,"ext":"http://152.32.170.60/guot54/yg88/raw/branch/main/h/%e5%9b%9b%e8%99%8e.json","jar":"http://152.32.170.60/guot54/yg88/raw/branch/main/jar/Yoursmile2.jar"},
 {"key": "MV_vod","name": "👀┃19┃视频","type": 1,"api": "https://sousu.popefih902.repl.co/vod/19","searchable": 1,"quickSearch": 1,"filterable": 1},
 {"key":"新浪资源","name":"新浪资源(切)","type":1,"api":"http://api.xinlangapi.com/xinlangapi.php/provide/vod/","searchable":1,"quickSearch":1},
 {"key":"色播","name": "🔞色播直播","type": 3,"api":"./h/色播.js","searchable": 1,"changeable": 0},
