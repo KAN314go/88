@@ -8,7 +8,7 @@
   "分类url": "https://www.keke5.app/show/{cateId}-{class}-{area}-{lang}-{year}-3-{catePg}.html",
   "二次截取": "div class=\"module-box module-v-box\">&&<div class=\"pagenation-box fs-margin-section\">",
   "数组": "<a&&</a>",
-  "图片": "data-original=\"&&\"",
+  "图片": "data-original=\"&&\"[替换:/vod1>>https://61.147.93.252:15002/vod1]",
 
   "标题": "title=\"&&\"",
   "链接": "href=\"&&\"",
@@ -18,7 +18,7 @@
   "搜索url": "https://www.keke5.app/search?k={wd}",
   "搜索二次截取": "<div class=\"search-result-list fs-margin-section\">&&</a>",
   "搜索数组": "<a&&<div class=\"search-result-item-main\">",
-  "搜索图片": "data-original=\"&&\"",
+  "搜索图片": "data-original=\"&&\"[替换:/vod1>>https://61.147.93.252:15002/vod1]",
 
   "搜索标题": "title=\"&&\"",
   "搜索链接": "href=\"&&\"",
