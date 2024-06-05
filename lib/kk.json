@@ -3,7 +3,7 @@
   "主页url": "https://www.keke5.app/",
   "发布": "",
   
-  "分类": "电视剧$2#电影$1#动漫$3#综艺$4#",
+  "分类": "电视剧$2#电影$1#动漫$3#综艺$4#短剧$6#",
   
   "分类url": "https://www.keke5.app/show/{cateId}-{class}-{area}-{lang}-{year}-3-{catePg}.html",
   "二次截取": "div class=\"module-box module-v-box\">&&<div class=\"pagenation-box fs-margin-section\">",
