@@ -1,0 +1,97 @@
+{
+    "return_live": [
+        {
+            "name": "自定义隐藏频道",
+            "channel": [
+                {
+                    "id": 402,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "松视1台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 403,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "松视2台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 404,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "松视3台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 406,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "彩虹频道",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 2909,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "JSTAR极限台电影频道",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 410,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "潘朵啦高画质粉红台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 415,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "彩虹E台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 2935,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "彩虹E台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 2932,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "潘朵啦高画质玩美台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 2930,
+                    "cid": "自定义分类",
+                    "lid": 0,
+                    "title": "香蕉台",
+                    "logo": "",
+                    "res": 0
+                },
+                {
+                    "id": 2908,
+                    "cid": "Adult",
+                    "lid": 0,
+                    "title": "HAPPY频道",
+                    "logo": "",
+                    "res": 0
+                }
+            ]
+        }
+    ]
+}
