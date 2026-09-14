@@ -18,6 +18,7 @@ class Spider(Spider):
     """
     DreamTV -> 影視壳 / TVBox Spider
     依照 dream.php 的 1-1-2 -> 1-1-3 -> 1-1-4 流程取得頻道。
+    台标匹配：多级模糊匹配（精确别名 → 模糊别名 → 拼音 → 112114兜底）
     """
 
     def __init__(self):
@@ -54,14 +55,17 @@ class Spider(Spider):
         self.cache_time = 0
         self.auth_time = 0
 
-        # ===== 频道别名库（懒加载，避免影响启动速度） =====
-        self._alias_map = None
+        # ===== 别名库 =====
+        self._alias_map = None          # 归一化别名 -> logo URL
+        self._alias_list = []           # [(归一化别名, logo URL)] 用于模糊匹配
         self._alias_load_time = 0
         self._alias_url = (
             "https://gcore.jsdelivr.net/gh/taksssss/tv@main/ku9/epg_data.json"
         )
 
-        # 默认占位图
+        # ===== 拼音缓存 =====
+        self._pinyin_cache = {}
+
         self.default_logo = "https://img.icons8.com/color/48/tv.png"
 
     # =========================================================
@@ -99,10 +103,7 @@ class Spider(Spider):
 
             classes = [{"type_id": "all", "type_name": "全部頻道"}]
             for category in categories:
-                classes.append({
-                    "type_id": category,
-                    "type_name": category
-                })
+                classes.append({"type_id": category, "type_name": category})
 
             return {"class": classes, "filters": {}}
         except Exception as e:
@@ -139,11 +140,8 @@ class Spider(Spider):
                     videos.append(video)
 
             return {
-                "page": 1,
-                "pagecount": 1,
-                "limit": len(videos),
-                "total": len(videos),
-                "list": videos
+                "page": 1, "pagecount": 1, "limit": len(videos),
+                "total": len(videos), "list": videos
             }
         except Exception as e:
             return {
@@ -171,13 +169,9 @@ class Spider(Spider):
 
         return {
             "list": [{
-                "vod_id": pid,
-                "vod_name": name,
-                "vod_pic": logo,
-                "vod_remarks": "直播",
-                "vod_content": "DreamTV直播頻道",
-                "vod_play_from": "DreamTV",
-                "vod_play_url": "播放$" + pid
+                "vod_id": pid, "vod_name": name, "vod_pic": logo,
+                "vod_remarks": "直播", "vod_content": "DreamTV直播頻道",
+                "vod_play_from": "DreamTV", "vod_play_url": "播放$" + pid
             }]
         }
 
@@ -188,11 +182,9 @@ class Spider(Spider):
         try:
             if not key:
                 return {"list": []}
-
             key = str(key).lower()
             channels = self._get_channels()
             videos = []
-
             for item in channels:
                 name = self.get_channel_name(item)
                 if key not in name.lower():
@@ -200,7 +192,6 @@ class Spider(Spider):
                 video = self._channel_to_video(item)
                 if video:
                     videos.append(video)
-
             return {"list": videos}
         except Exception as e:
             return {"list": [], "msg": "DreamTV searchContent: %s" % str(e)}
@@ -214,22 +205,15 @@ class Spider(Spider):
     def playerContent(self, flag, pid, vipFlags):
         if not pid:
             return {"parse": 0, "playUrl": "", "url": ""}
-
         try:
             self._ensure_auth()
             return {
-                "parse": 0,
-                "playUrl": "",
-                "url": str(pid),
+                "parse": 0, "playUrl": "", "url": str(pid),
                 "header": {
-                    "User-Agent": "Lavf/58.12.100",
-                    "Accept": "*/*",
-                    "Connection": "keep-alive",
-                    "Icy-MetaData": "1",
-                    "userid": str(self.client_id),
-                    "usertoken": str(self.token),
-                    "Cache-Control": "no-cache",
-                    "Pragma": "no-cache"
+                    "User-Agent": "Lavf/58.12.100", "Accept": "*/*",
+                    "Connection": "keep-alive", "Icy-MetaData": "1",
+                    "userid": str(self.client_id), "usertoken": str(self.token),
+                    "Cache-Control": "no-cache", "Pragma": "no-cache"
                 }
             }
         except Exception as e:
@@ -264,15 +248,11 @@ class Spider(Spider):
     def _post(self, payload):
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         last_error = "Dream API request failed"
-
         for api_url in self.api_urls:
             try:
                 response = self.session.post(
-                    api_url,
-                    data=body.encode("utf-8"),
-                    headers=self._headers(body),
-                    timeout=15,
-                    verify=False
+                    api_url, data=body.encode("utf-8"),
+                    headers=self._headers(body), timeout=15, verify=False
                 )
                 if response.status_code != 200:
                     last_error = "HTTP %s" % response.status_code
@@ -286,7 +266,6 @@ class Spider(Spider):
                     last_error = "API 回應格式錯誤"
             except Exception as e:
                 last_error = str(e)
-
         raise Exception(last_error)
 
     def _login_step_1(self):
@@ -295,33 +274,26 @@ class Spider(Spider):
         payload = {
             "method": method,
             "params": {
-                "device_id": self.devid,
-                "hardware": self.hardware,
-                "sn": self.devid,
-                "version": self.version
+                "device_id": self.devid, "hardware": self.hardware,
+                "sn": self.devid, "version": self.version
             },
             "system": {
-                "from": self.from_id,
-                "sign": self._sign(ts, method),
-                "time": ts,
-                "version": "V1"
+                "from": self.from_id, "sign": self._sign(ts, method),
+                "time": ts, "version": "V1"
             }
         }
         data = self._post(payload)
         if not isinstance(data, dict):
             raise Exception("1-1-2 data 格式錯誤")
-
         client = data.get("client") or {}
         server = data.get("server") or {}
         token = client.get("token")
         if not token:
             raise Exception("你的 IP 或 devid 被 Dream 封鎖")
-
         self.token = str(token)
         self.client_id = str(client.get("client_id") or "")
         self.password = str(client.get("password") or "")
         self.server_time = int(client.get("time") or ts)
-
         hosts = server.get("hosts") or []
         if hosts:
             first = hosts[0]
@@ -390,11 +362,9 @@ class Spider(Spider):
         if (self.channels_cache
                 and (time.time() - self.cache_time) < 600):
             return self.channels_cache
-
         self._login_step_1()
         self._login_step_2()
         channels = self._fetch_channel_data()
-
         self.channels_cache = channels
         self.cache_time = time.time()
         self.auth_time = time.time()
@@ -409,37 +379,83 @@ class Spider(Spider):
     def get_channel_name(self, item):
         if not isinstance(item, dict):
             return "DreamTV"
-        return str(
-            item.get("name") or item.get("title")
-            or item.get("channel_name") or "DreamTV"
-        )
+        return str(item.get("name") or item.get("title")
+                   or item.get("channel_name") or "DreamTV")
 
     def get_channel_category(self, item):
         if not isinstance(item, dict):
             return "DreamTV"
-        return str(
-            item.get("category") or item.get("group")
-            or item.get("group_name") or "DreamTV"
-        )
+        return str(item.get("category") or item.get("group")
+                   or item.get("group_name") or "DreamTV")
 
     def get_channel_url(self, item):
         if not isinstance(item, dict):
             return ""
-        return str(
-            item.get("url") or item.get("play_url")
-            or item.get("stream_url") or ""
-        )
+        return str(item.get("url") or item.get("play_url")
+                   or item.get("stream_url") or "")
 
     # =========================================================
-    # ★★★ 多级回退台标匹配 ★★★
+    # ★★★ 多级模糊匹配台标 ★★★
     # =========================================================
+    def _normalize(self, name):
+        """频道名归一化：去后缀、去符号、转大写"""
+        if not name:
+            return ""
+        name = str(name).strip()
+        name = re.sub(
+            r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080)$',
+            '', name, flags=re.IGNORECASE
+        )
+        name = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', name)
+        return name.upper()
+
+    def _get_pinyin(self, text):
+        """获取文本的拼音（带缓存）"""
+        if text in self._pinyin_cache:
+            return self._pinyin_cache[text]
+        try:
+            from pypinyin import lazy_pinyin
+            py = ''.join(lazy_pinyin(text))
+        except ImportError:
+            py = text.lower()
+        self._pinyin_cache[text] = py
+        return py
+
+    def _edit_distance(self, s1, s2):
+        """编辑距离"""
+        if len(s1) < len(s2):
+            return self._edit_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        prev_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
+
+    def _similarity(self, s1, s2):
+        """相似度 0.0 ~ 1.0"""
+        if not s1 or not s2:
+            return 0.0
+        max_len = max(len(s1), len(s2))
+        if max_len == 0:
+            return 1.0
+        return 1.0 - self._edit_distance(s1, s2) / max_len
+
     def _load_alias_map(self):
-        """加载社区别名库（epg_data.json），缓存1小时"""
+        """加载社区别名库，缓存1小时"""
         now = time.time()
         if self._alias_map is not None and (now - self._alias_load_time) < 3600:
-            return self._alias_map
+            return
 
         alias_map = {}
+        alias_list = []
+
         try:
             resp = self.session.get(
                 self._alias_url, timeout=10, verify=False,
@@ -453,64 +469,93 @@ class Spider(Spider):
                     name_str = str(item.get("name", "")).strip()
                     if not epgid or not logo:
                         continue
-                    # name 字段格式: "CCTV1,CCTV-1,CCTV1综合,..."（逗号分隔）
+
+                    # name 字段格式: "CCTV1,CCTV-1,CCTV1综合,..."
                     aliases = [a.strip() for a in name_str.split(",") if a.strip()]
-                    # 把 epgid 本身也作为别名
                     aliases.append(epgid)
+
                     for a in aliases:
-                        # 统一清洗后作为 key
-                        clean_a = self._clean_name(a)
-                        if clean_a:
-                            alias_map[clean_a] = logo
+                        norm = self._normalize(a)
+                        if norm:
+                            alias_map[norm] = logo
+                            alias_list.append((norm, logo))
+
+                    # 同时保存拼音索引
+                    for a in aliases:
+                        norm = self._normalize(a)
+                        if norm:
+                            py = self._get_pinyin(norm)
+                            if py:
+                                alias_map["PY:" + py] = logo
+                                alias_list.append(("PY:" + py, logo))
+
         except Exception as e:
             print("★ 别名库加载失败:", e)
 
         self._alias_map = alias_map
+        self._alias_list = alias_list
         self._alias_load_time = now
-        return alias_map
 
-    def _clean_name(self, name):
-        """统一清洗频道名：去后缀、去空格、去横杠、转大写"""
-        if not name:
+    def _match_from_alias_exact(self, ch_name):
+        """Level 1: 别名库精确匹配"""
+        if not self._alias_map:
             return ""
-        name = str(name).strip()
-        # 去掉高清/超清/HD/4K 等后缀（可能在末尾或 - 后）
-        name = re.sub(
-            r'(?:[-\s]*(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080))$',
-            '', name, flags=re.IGNORECASE
-        )
-        # 去掉所有横杠、空格、点、括号
-        name = re.sub(r'[\s\-\.\(\)\[\]（）【】]', '', name)
-        return name.upper()
-
-    def _match_from_alias(self, ch_name):
-        """从社区别名库匹配，返回 logo URL 或空"""
-        alias_map = self._load_alias_map()
-        if not alias_map:
-            return ""
-
-        clean = self._clean_name(ch_name)
-        if not clean:
-            return ""
-
-        # 1) 精确匹配
-        if clean in alias_map:
-            return alias_map[clean]
-
-        # 2) 尝试去掉末尾数字/字母后匹配（处理 "CCTV1HD" -> "CCTV1"）
-        stripped = re.sub(r'[A-Z0-9]+$', '', clean)
-        if stripped and stripped in alias_map:
-            return alias_map[stripped]
-
+        norm = self._normalize(ch_name)
+        if norm in self._alias_map:
+            return self._alias_map[norm]
+        # 尝试去掉末尾字母数字
+        stripped = re.sub(r'[A-Z0-9]+$', '', norm)
+        if stripped and stripped in self._alias_map:
+            return self._alias_map[stripped]
         return ""
 
-    def _match_from_112114(self, ch_name):
-        """112114 接口兜底"""
-        clean = self._clean_name(ch_name)
-        if not clean:
+    def _match_from_alias_fuzzy(self, ch_name, threshold=0.80):
+        """Level 2: 别名库模糊匹配（编辑距离）"""
+        if not self._alias_list:
             return ""
-        # 112114 需要原始格式，这里用清洗后的但保留中文和数字
-        # 重新生成一个适合 112114 的名字
+        norm = self._normalize(ch_name)
+        if not norm:
+            return ""
+
+        best_score = 0.0
+        best_logo = ""
+
+        for alias_norm, logo in self._alias_list:
+            if alias_norm.startswith("PY:"):
+                continue
+            score = self._similarity(norm, alias_norm)
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_logo = logo
+
+        return best_logo
+
+    def _match_from_pinyin(self, ch_name, threshold=0.85):
+        """Level 3: 拼音匹配"""
+        if not self._alias_list:
+            return ""
+
+        norm = self._normalize(ch_name)
+        py = self._get_pinyin(norm)
+        if not py:
+            return ""
+
+        best_score = 0.0
+        best_logo = ""
+
+        for alias_norm, logo in self._alias_list:
+            if not alias_norm.startswith("PY:"):
+                continue
+            alias_py = alias_norm[3:]
+            score = self._similarity(py, alias_py)
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_logo = logo
+
+        return best_logo
+
+    def _match_from_112114(self, ch_name):
+        """Level 4: 112114 接口兜底"""
         raw = str(ch_name).strip()
         raw = re.sub(
             r'(?:[-\s]*(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清))$',
@@ -521,39 +566,50 @@ class Spider(Spider):
             return ""
         return f"https://epg.112114.eu.org/logo/{quote(raw)}.png"
 
-    # ★★★ 改后的台标获取（多级回退） ★★★
     def get_channel_logo(self, item):
+        """多级台标匹配"""
         if not isinstance(item, dict):
             return self.default_logo
 
         name = self.get_channel_name(item)
 
-        # Level 1: API 自带 logo
+        # Level 0: API 自带 logo
         raw_logo = str(
             item.get("logo") or item.get("pic") or item.get("icon") or ""
         ).strip()
         if raw_logo and raw_logo.lower() not in ("null", "none", "0", ""):
-            # 相对路径拼 server
             if raw_logo.startswith("/") and self.server:
                 return self.server.rstrip("/") + raw_logo
             if raw_logo.startswith("http"):
                 return raw_logo
-            # 其他相对路径也拼一下
             if self.server:
                 return self.server.rstrip("/") + "/" + raw_logo.lstrip("/")
             return raw_logo
 
-        # Level 2: 社区别名库
-        logo = self._match_from_alias(name)
+        # 确保别名库已加载
+        self._load_alias_map()
+
+        # Level 1: 精确匹配
+        logo = self._match_from_alias_exact(name)
         if logo:
             return logo
 
-        # Level 3: 112114 接口
+        # Level 2: 模糊匹配
+        logo = self._match_from_alias_fuzzy(name)
+        if logo:
+            return logo
+
+        # Level 3: 拼音匹配
+        logo = self._match_from_pinyin(name)
+        if logo:
+            return logo
+
+        # Level 4: 112114 兜底
         logo = self._match_from_112114(name)
         if logo:
             return logo
 
-        # Level 4: 默认图
+        # Level 5: 默认图
         return self.default_logo
 
     def get_channel_play_url(self, item):
@@ -576,7 +632,6 @@ class Spider(Spider):
         play_url = self.get_channel_play_url(item)
         if not play_url:
             return None
-
         return {
             "vod_id": play_url,
             "vod_name": self.get_channel_name(item),
@@ -630,8 +685,5 @@ class Spider(Spider):
         except Exception:
             return "#EXTM3U"
 
-    # =========================================================
-    # 本地代理介面保留
-    # =========================================================
     def localProxy(self, param):
         return [404, "text/plain", ""]
