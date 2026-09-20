@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-# TVBox 聚合直播源：玉山 + 安博 + 全球
-# 首页显示 3 个板块，点进去用 filter 切换分类
+# TVBox 聚合直播：玉山 + 安博 + 全球
+# 修复：HTTP 懒加载（解决聚合环境 import requests 失败）
+#       玉山播放用 live#N 保留 header
+#       全局台标兜底
 
 import os
 import re
@@ -14,24 +16,6 @@ import hashlib
 import urllib.parse
 import urllib.request
 import ssl
-
-try:
-    import requests as _requests
-    HAS_REQ = True
-except ImportError:
-    HAS_REQ = False
-
-try:
-    from curl_cffi import requests as _cffi
-    HAS_CFFI = True
-except ImportError:
-    HAS_CFFI = False
-
-try:
-    from Crypto.Cipher import AES
-    HAS_AES = True
-except ImportError:
-    HAS_AES = False
 
 try:
     import urllib3
@@ -51,15 +35,97 @@ SEP = ":"
 UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/131.0.0.0 Safari/537.36")
-
-_LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
+LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
 
 
 def _log(msg):
     print("[聚合] %s" % msg, flush=True)
 
 
-def _split_full_id(full_id):
+# ============================================================
+# HTTP 懒加载层 —— 解决聚合环境 import 失败
+# ============================================================
+_HTTP_KIND = None
+_HTTP_SESSION = None
+
+
+def _get_http():
+    global _HTTP_KIND, _HTTP_SESSION
+    if _HTTP_KIND is not None:
+        return _HTTP_KIND, _HTTP_SESSION
+
+    try:
+        import requests as _r
+        s = _r.Session()
+        try:
+            s.verify = False
+        except Exception:
+            pass
+        _HTTP_KIND, _HTTP_SESSION = "requests", s
+        _log("HTTP 层: requests")
+        return _HTTP_KIND, _HTTP_SESSION
+    except Exception as e:
+        _log("requests 导入失败: %s" % str(e)[:80])
+
+    try:
+        from curl_cffi import requests as _cf
+        s = _cf.Session()
+        _HTTP_KIND, _HTTP_SESSION = "cffi", s
+        _log("HTTP 层: curl_cffi")
+        return _HTTP_KIND, _HTTP_SESSION
+    except Exception as e:
+        _log("curl_cffi 导入失败: %s" % str(e)[:80])
+
+    _HTTP_KIND, _HTTP_SESSION = "urllib", None
+    _log("HTTP 层: urllib（无第三方库）")
+    return _HTTP_KIND, _HTTP_SESSION
+
+
+def _http_get(url, timeout=15, headers=None, verify=False):
+    kind, sess = _get_http()
+    h = dict(headers or {})
+    if kind == "requests":
+        r = sess.get(url, timeout=timeout, verify=verify, headers=h)
+        return r.status_code, r.text
+    if kind == "cffi":
+        r = sess.get(url, timeout=timeout, verify=verify, headers=h)
+        return r.status_code, r.text
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        raw = resp.read()
+        if raw.startswith(b"\x1f\x8b"):
+            raw = gzip.decompress(raw)
+        return resp.status, raw.decode("utf-8", errors="ignore")
+
+
+def _http_post(url, data=None, json_body=None, timeout=15,
+               headers=None, verify=False):
+    kind, sess = _get_http()
+    h = dict(headers or {})
+    if kind == "requests":
+        r = sess.post(url, data=data, json=json_body,
+                      timeout=timeout, verify=verify, headers=h)
+        return r.status_code, r.text
+    if kind == "cffi":
+        r = sess.post(url, data=data, json=json_body,
+                      timeout=timeout, verify=verify, headers=h)
+        return r.status_code, r.text
+    body = data
+    if json_body is not None:
+        body = json.dumps(json_body).encode("utf-8")
+        h.setdefault("Content-Type", "application/json")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, data=body, headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.status, resp.read().decode("utf-8", errors="ignore")
+
+
+def _split_id(full_id):
     s = str(full_id or "")
     if ":" in s:
         p, r = s.split(":", 1)
@@ -70,42 +136,42 @@ def _split_full_id(full_id):
     return "", s
 
 
-# ============ 全局台标兜底（主类用）============
+# ============================================================
+# 台标兜底
+# ============================================================
+_LOGO_ALIAS = {
+    "CCTV5PLUS": "CCTV5+", "CCTV5+": "CCTV5+",
+    "凤凰中文": "凤凰卫视中文台", "凤凰资讯": "凤凰卫视资讯台",
+    "凤凰香港": "凤凰卫视香港台", "凤凰电影": "凤凰卫视电影台",
+    "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
+    "TVB": "翡翠台", "VIUTV": "ViuTV", "HOYTV": "HOY TV",
+    "民视": "民视新闻台", "中天": "中天新闻台", "东森": "东森新闻台",
+    "三立": "三立新闻台", "TVBS": "TVBS新闻台", "年代": "年代新闻",
+    "八大": "八大第一台", "非凡": "非凡新闻台", "纬来": "纬来综合台",
+    "龙华": "龙华偶像台", "大爱": "大爱一台",
+    "翡翠台": "翡翠台", "明珠台": "明珠台", "澳视澳门": "澳视澳门",
+}
+
+
 def _fallback_logo(name):
     if not name:
         return ""
-    n = re.sub(
-        r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080)$',
-        '', str(name).strip(), flags=re.IGNORECASE)
-    norm = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', n).upper()
-    if not norm:
-        return ""
+    n = str(name).strip()
+    clean = re.sub(
+        r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清)$',
+        '', n, flags=re.IGNORECASE)
+    norm = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', clean).upper()
 
-    # CCTV 系列
     m = re.search(r'CCTV(\d+)(\+|PLUS)?', norm)
     if m:
-        return _LOGO_CDN.format("CCTV" + m.group(1) + ("+" if m.group(2) else ""))
+        return LOGO_CDN.format("CCTV" + m.group(1) + ("+" if m.group(2) else ""))
 
-    # 别名表
-    alias = {
-        "凤凰中文": "凤凰卫视中文台", "凤凰资讯": "凤凰卫视资讯台",
-        "凤凰香港": "凤凰卫视香港台", "凤凰电影": "凤凰卫视电影台",
-        "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
-        "TVB": "翡翠台", "VIUTV": "ViuTV", "HOYTV": "HOY TV",
-        "民视": "民视新闻台", "中天": "中天新闻台", "东森": "东森新闻台",
-        "三立": "三立新闻台", "TVBS": "TVBS新闻台", "年代": "年代新闻",
-        "八大": "八大第一台", "非凡": "非凡新闻台", "纬来": "纬来综合台",
-        "龙华": "龙华偶像台", "大爱": "大爱一台",
-        "翡翠台": "翡翠台", "明珠台": "明珠台",
-    }
-    for k in sorted(alias, key=len, reverse=True):
+    for k in sorted(_LOGO_ALIAS, key=len, reverse=True):
         if k.upper() in norm:
-            return _LOGO_CDN.format(urllib.parse.quote(alias[k]))
+            return LOGO_CDN.format(urllib.parse.quote(_LOGO_ALIAS[k]))
 
-    # 含"卫视"的直接拿去试
-    if "卫视" in str(name) or "卫视" in norm:
-        return _LOGO_CDN.format(urllib.parse.quote(str(name).strip()))
-
+    if re.search(r'[\u4e00-\u9fff]', clean):
+        return LOGO_CDN.format(urllib.parse.quote(clean))
     return ""
 
 
@@ -117,18 +183,16 @@ class YushanSource(object):
     NAME = "玉山"
     PLAY_FROM = "玉山直播"
     DEFAULT_M3U_URL = "https://www.liaobagua.com/tv/tv.php?a=play"
+    BASE_REFERER = "https://www.liaobagua.com/"
 
     FETCH_HEADERS = {
-        "User-Agent": UA_BROWSER,
-        "Accept": "*/*",
+        "User-Agent": UA_BROWSER, "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://www.liaobagua.com/",
+        "Referer": BASE_REFERER,
     }
-
-    RESTRICTED_NAMES = [
-        "乐活频道", "HiPLAY", "彩虹R频道", "潘朵拉玩美", "潘朵拉粉红",
-        "K频道", "彩虹MOIVE", "彩虹e台", "星颖", "HAPPY",
-    ]
+    RESTRICTED_NAMES = ["乐活频道", "HiPLAY", "彩虹R频道", "潘朵拉玩美",
+                        "潘朵拉粉红", "K频道", "彩虹MOIVE", "彩虹e台",
+                        "星颖", "HAPPY"]
     EXACT_MAP = {"凤凰卫视中文台": "大陆"}
     KEYWORD_RULES = {
         "体育": ["CCTV-5", "CCTV5", "风云足球", "高尔夫网球", "央视台球",
@@ -209,41 +273,16 @@ class YushanSource(object):
         return "国际"
 
     def _fetch(self):
-        h = dict(self.FETCH_HEADERS)
-        if HAS_CFFI:
-            try:
-                r = _cffi.get(self.m3u_url, headers=h, impersonate="chrome131",
-                              verify=False, timeout=15, allow_redirects=True)
-                if r.status_code == 200 and r.text:
-                    _log("[玉山] cffi 拿到 %d 字节" % len(r.text))
-                    return r.text
-            except Exception as e:
-                _log("[玉山] cffi err: %s" % str(e)[:60])
-        if HAS_REQ:
-            try:
-                r = _requests.get(self.m3u_url, headers=h, verify=False,
-                                  timeout=15, allow_redirects=True)
-                if r.status_code == 200 and r.text:
-                    _log("[玉山] req 拿到 %d 字节" % len(r.text))
-                    return r.text
-            except Exception as e:
-                _log("[玉山] req err: %s" % str(e)[:60])
         try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            opener = urllib.request.build_opener(
-                urllib.request.HTTPSHandler(context=ctx))
-            rq = urllib.request.Request(self.m3u_url, headers=h)
-            with opener.open(rq, timeout=15) as resp:
-                raw = resp.read()
-                if raw.startswith(b"\x1f\x8b"):
-                    raw = gzip.decompress(raw)
-                text = raw.decode("utf-8", errors="ignore")
-                _log("[玉山] urllib 拿到 %d 字节" % len(text))
-                return text
+            st, txt = _http_get(self.m3u_url,
+                                timeout=15, headers=self.FETCH_HEADERS)
+            if st == 200 and txt:
+                _log("[玉山] 拉到 %d 字节" % len(txt))
+                return txt
+            _log("[玉山] HTTP %s" % st)
         except Exception as e:
-            _log("[玉山] urllib err: %s" % str(e)[:60])
+            _log("[玉山] fetch err: %s: %s"
+                 % (type(e).__name__, str(e)[:60]))
         return ""
 
     def _parse(self, text):
@@ -337,12 +376,10 @@ class YushanSource(object):
         return arr
 
     def categories(self):
-        # ★ 从实际解析出的分组里提取，避免空分类
         try:
-            cats = [cat for cat, lst in self._load() if lst]
+            return [cat for cat, lst in self._load() if lst]
         except Exception:
-            cats = list(self.CATEGORY_ORDER)
-        return cats
+            return []
 
     def categoryContent(self, tid, pg, filter, extend):
         tid = str(tid).strip()
@@ -353,7 +390,7 @@ class YushanSource(object):
             vids.append({
                 "vod_id": "live#%d" % i,
                 "vod_name": ch["name"],
-                "vod_pic": ch["logo"],
+                "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
                 "vod_remarks": ch["cat"],
             })
         return {"list": vids, "page": 1, "pagecount": 1,
@@ -371,11 +408,15 @@ class YushanSource(object):
             arr = self._flat()
             if 0 <= idx < len(arr):
                 ch = arr[idx]
+                safe = str(ch["name"]).replace("$", " ").replace("#", " ")
                 return {"list": [{
-                    "vod_id": s, "vod_name": ch["name"], "vod_pic": ch["logo"],
+                    "vod_id": s,
+                    "vod_name": ch["name"],
+                    "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
                     "vod_remarks": ch["cat"],
                     "vod_play_from": self.PLAY_FROM,
-                    "vod_play_url": "%s$%s" % (ch["name"], ch["url"]),
+                    # ★ 关键：pid 还是 live#N，不是裸 URL
+                    "vod_play_url": "%s$%s" % (safe, s),
                 }]}
         return {"list": []}
 
@@ -392,11 +433,14 @@ class YushanSource(object):
             if 0 <= idx < len(arr):
                 ch = arr[idx]
                 headers = {"User-Agent": ch.get("ua") or UA_BROWSER}
-                headers["Referer"] = (ch.get("referer")
-                                      or "https://www.liaobagua.com/")
-                return {"parse": 0, "jx": 0, "url": ch["url"], "header": headers}
+                headers["Referer"] = ch.get("referer") or self.BASE_REFERER
+                _log("[玉山] 播放 %s -> %s" % (ch["name"], ch["url"][:60]))
+                return {"parse": 0, "jx": 0,
+                        "url": ch["url"], "header": headers}
         if s.startswith("http"):
-            return {"parse": 0, "jx": 0, "url": s, "header": {}}
+            return {"parse": 0, "jx": 0, "url": s,
+                    "header": {"User-Agent": UA_BROWSER,
+                               "Referer": self.BASE_REFERER}}
         return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
     def search(self, key):
@@ -409,14 +453,14 @@ class YushanSource(object):
                 out.append({
                     "vod_id": "live#%d" % i,
                     "vod_name": ch["name"],
-                    "vod_pic": ch["logo"],
+                    "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
                     "vod_remarks": ch["cat"],
                 })
         return out
 
 
 # ============================================================
-# 源 2：安博（UBLive）
+# 源 2：安博
 # ============================================================
 class AnboSource(object):
     PREFIX = "ab"
@@ -432,14 +476,33 @@ class AnboSource(object):
         self.user = "12345678"
         self.pwd = "12345678"
         self.mac = "00:1a:3b:5c:7d:9e"
-        self.base_dir = (os.path.dirname(os.path.abspath(__file__))
-                         if "__file__" in globals() else "/sdcard/tvbox/py")
+        self.base_dir = self._guess_base_dir()
         self.channels = []
         self.categories = []
         self.default_logo = "https://img.icons8.com/color/48/tv.png"
         self._token = None
         self._token_time = 0
-        self.session = _requests.Session() if HAS_REQ else None
+
+    def _guess_base_dir(self):
+        cands = []
+        try:
+            if "__file__" in globals() and __file__ and \
+                    not str(__file__).startswith("<"):
+                cands.append(os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            pass
+        try:
+            if sys.path and sys.path[0] and os.path.isdir(sys.path[0]):
+                cands.append(sys.path[0])
+        except Exception:
+            pass
+        try:
+            cands.append(os.getcwd())
+        except Exception:
+            pass
+        cands.extend(["/sdcard/tvbox/py/", "/sdcard/tvbox/",
+                      "/sdcard/Download/", "/sdcard/"])
+        return cands[0] if cands else "/sdcard/tvbox/py"
 
     def init(self, extend=""):
         pass
@@ -487,8 +550,16 @@ class AnboSource(object):
         c = self._md5(a + b + "201306@202106>")
         return self._md5(c + "Ub")
 
+    def _aes(self):
+        try:
+            from Crypto.Cipher import AES
+            return AES
+        except ImportError:
+            return None
+
     def _enc(self, payload):
-        if not HAS_AES:
+        AES = self._aes()
+        if AES is None:
             return {"sign": "", "iv": ""}
         s = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
         iv = self._rand(16)
@@ -502,7 +573,8 @@ class AnboSource(object):
         return {"sign": rnd + sign, "iv": iv}
 
     def _dec(self, sign, iv):
-        if not sign or not iv or not HAS_AES:
+        AES = self._aes()
+        if not sign or not iv or AES is None:
             return ""
         try:
             idx = self._get_index(sign[-6])
@@ -534,35 +606,31 @@ class AnboSource(object):
         }
 
     def _dev(self, token, ts):
-        return {
-            "app_laguage": 2, "brand": "Unblock", "cpu_api": "arm64-v8a",
-            "cpu_api2": "", "device_flag": "", "mac": self.mac,
-            "model": "UBOX10", "time": ts, "token": token,
-            "ubcode": "88888888",
-        }
+        return {"app_laguage": 2, "brand": "Unblock", "cpu_api": "arm64-v8a",
+                "cpu_api2": "", "device_flag": "", "mac": self.mac,
+                "model": "UBOX10", "time": ts, "token": token,
+                "ubcode": "88888888"}
 
     def _fetch_token(self):
-        if self.session is None:
-            return None
         body = {"icode": "", "icode_name": self.user,
                 "icode_passwd": self.pwd,
                 "icode_sign": self._serial_md5(self.user), "signup": 0}
         ts = int(time.time())
         h = self._headers(self._dev("a1391713a32e61d249b319def67ed961", ts))
         try:
-            r = self.session.post(f"{self.api}/{self.login_ep}",
-                                  json=self._enc(body), headers=h,
-                                  timeout=6, verify=False)
-            if r.status_code == 200 and r.text:
-                j = r.json()
+            st, txt = _http_post(f"{self.api}/{self.login_ep}",
+                                 json_body=self._enc(body),
+                                 headers=h, timeout=8)
+            if st == 200 and txt:
+                j = json.loads(txt)
                 d = json.loads(self._dec(j.get("sign"), j.get("iv")))
                 if str(d.get("return_code")) == "99":
                     _log("[安博] token 成功")
                     return d.get("return_token")
-                else:
-                    _log("[安博] token return_code=%s" % d.get("return_code"))
+                _log("[安博] token rc=%s" % d.get("return_code"))
         except Exception as e:
-            _log("[安博] token err: %s" % str(e)[:80])
+            _log("[安博] token err: %s: %s"
+                 % (type(e).__name__, str(e)[:80]))
         return None
 
     def _ensure_token(self):
@@ -575,57 +643,55 @@ class AnboSource(object):
         return self._token
 
     def _get_uri(self, token, cid):
-        if self.session is None:
-            return None
         ts = int(time.time())
         live = {"icode_name": self.user, "icode_passwd": self.pwd,
                 "icode_sign": self._serial_md5(self.user), "token": token}
         h = self._headers(self._dev(token, ts))
         try:
-            self.session.post(f"{self.api}/{self.ch_ep}",
-                              json=self._enc(live), headers=h,
-                              timeout=4, verify=False)
+            _http_post(f"{self.api}/{self.ch_ep}",
+                       json_body=self._enc(live), headers=h, timeout=5)
             uri_body = {"icode_name": self.user, "icode_passwd": self.pwd,
                         "icode_sign": self._serial_md5(self.user),
                         "token": token, "id": str(cid)}
             for _ in range(2):
-                r = self.session.post(f"{self.api}/{self.uri_ep}",
-                                      json=self._enc(uri_body), headers=h,
-                                      timeout=5, verify=False)
-                if r.status_code == 200 and r.text:
-                    j = r.json()
+                st, txt = _http_post(f"{self.api}/{self.uri_ep}",
+                                     json_body=self._enc(uri_body),
+                                     headers=h, timeout=8)
+                if st == 200 and txt:
+                    j = json.loads(txt)
                     d = json.loads(self._dec(j.get("sign"), j.get("iv")))
                     if str(d.get("return_code")) == "99":
                         return {"uri": d.get("return_uri"),
                                 "fftoken": d.get("return_fftoken") or "",
                                 "playtoken": d.get("return_playtoken") or ""}
-                    else:
-                        _log("[安博] uri return_code=%s" % d.get("return_code"))
+                    _log("[安博] uri rc=%s" % d.get("return_code"))
                 time.sleep(0.2)
         except Exception as e:
-            _log("[安博] uri err: %s" % str(e)[:80])
+            _log("[安博] uri err: %s: %s"
+                 % (type(e).__name__, str(e)[:80]))
         return None
 
     def _load_json(self, loc, fname):
         if str(loc).startswith(("http://", "https://")):
-            if self.session is None:
-                return None
+            url = loc.rstrip("/") + "/" + fname
             try:
-                r = self.session.get(loc.rstrip("/") + "/" + fname,
-                                     timeout=8, verify=False,
-                                     headers={"User-Agent": "okhttp/3.12.0"})
-                if r.status_code == 200 and r.text:
-                    return r.json()
-            except Exception:
-                return None
-        else:
-            p = os.path.join(loc, fname)
-            try:
-                if os.path.exists(p):
-                    with open(p, "r", encoding="utf-8") as f:
-                        return json.load(f)
-            except Exception:
-                return None
+                st, txt = _http_get(url, timeout=15,
+                                    headers={"User-Agent": "okhttp/3.12.0"})
+                _log("[安博] GET %s -> %s (%d 字节)"
+                     % (url, st, len(txt or "")))
+                if st == 200 and txt:
+                    return json.loads(txt)
+            except Exception as e:
+                _log("[安博] GET 失败 %s: %s: %s"
+                     % (url, type(e).__name__, str(e)[:80]))
+            return None
+        p = os.path.join(loc, fname)
+        try:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            return None
         return None
 
     @staticmethod
@@ -639,43 +705,34 @@ class AnboSource(object):
         c = self._clean_name(n)
         if not c:
             return self.default_logo
-        alias = {"凤凰中文": "凤凰卫视中文台", "凤凰资讯": "凤凰卫视资讯台",
-                 "凤凰香港": "凤凰卫视香港台", "凤凰电影": "凤凰卫视电影台",
-                 "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
-                 "TVB": "无线新闻台", "湖南金鹰": "金鹰卡通"}
-        c = alias.get(c, c)
-        return "https://epg.112114.eu.org/logo/%s.png" % urllib.parse.quote(c)
+        return _fallback_logo(c) or self.default_logo
 
     def _load(self):
         if self.channels:
             return self.channels
 
-        # ★ 打印实际路径，方便排查
-        try:
-            cur_file = os.path.abspath(__file__)
-        except Exception:
-            cur_file = "(无 __file__)"
-        _log("[安博] 当前文件: %s" % cur_file)
         _log("[安博] base_dir: %s" % self.base_dir)
-
         arr = []
         cats_order = []
-        dirs = [
-            "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py/",
-            self.base_dir,
+
+        # 多镜像 + 本地
+        cands = [
+            "https://cdn.jsdelivr.net/gh/kan1314go/9988@main/py",
+            "https://raw.gitmirror.com/kan1314go/9988/main/py",
+            "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py",
+            self.base_dir.rstrip("/") + "/",
             "/sdcard/tvbox/py/",
             "/sdcard/Download/",
-            "/sdcard/",
-            "/storage/emulated/0/tvbox/py/",
-            "/storage/emulated/0/Download/",
         ]
 
-        for d in dirs:
+        for d in cands:
+            hit = False
             for fn in ("channels.json", "extra.json"):
                 data = self._load_json(d, fn)
                 if not data:
                     continue
-                _log("[安博] ✓ 命中 %s/%s" % (d, fn))
+                hit = True
+                _log("[安博] ✓ 命中 %s%s" % (d, fn))
                 for cat in data.get("return_live", []):
                     g = str(cat.get("name", "未分類")).strip()
                     if g not in cats_order:
@@ -689,14 +746,17 @@ class AnboSource(object):
                             or self._match_logo(ct)
                         arr.append({"id": cid, "name": ct,
                                     "category": g, "logo": cl})
+            if hit:
+                break
 
         if not arr:
             _log("[安博] ⚠ 一个 JSON 都没命中")
-            arr = [{"id": "1", "name": "未偵測到 channels.json",
-                    "category": "系統提示", "logo": self.default_logo}]
-            cats_order = ["系統提示"]
+            arr = [{"id": "1", "name": "安博源未加载",
+                    "category": "系统提示", "logo": self.default_logo}]
+            cats_order = ["系统提示"]
         else:
-            _log("[安博] 共 %d 频道 / %d 分类" % (len(arr), len(cats_order)))
+            _log("[安博] 共 %d 频道 / %d 分类"
+                 % (len(arr), len(cats_order)))
 
         self.channels = arr
         self.categories = cats_order
@@ -736,27 +796,24 @@ class AnboSource(object):
         if not token:
             return {"list": [{
                 "vod_id": cid, "vod_name": name, "vod_pic": logo,
-                "vod_remarks": cat,
-                "vod_play_from": self.PLAY_FROM,
+                "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
                 "vod_play_url": "播放$__ERROR__:登录失败",
             }]}
-        _log("[安博] 请求频道 %s 播放地址..." % cid)
+        _log("[安博] 请求 %s 播放地址..." % cid)
         info = self._get_uri(token, cid)
         if not info or not info.get("uri"):
             return {"list": [{
                 "vod_id": cid, "vod_name": name, "vod_pic": logo,
-                "vod_remarks": cat,
-                "vod_play_from": self.PLAY_FROM,
-                "vod_play_url": "播放$__ERROR__:拿不到播放地址",
+                "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
+                "vod_play_url": "播放$__ERROR__:拿不到地址",
             }]}
-        u = info["uri"]
-        ff = info.get("fftoken", "") or ""
-        pt = info.get("playtoken", "") or ""
+        safe = str(name).replace("$", " ").replace("#", " ")
         return {"list": [{
             "vod_id": cid, "vod_name": name, "vod_pic": logo,
-            "vod_remarks": cat,
-            "vod_play_from": self.PLAY_FROM,
-            "vod_play_url": "%s$%s|%s|%s" % (name, u, ff, pt),
+            "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
+            "vod_play_url": "%s$%s|%s|%s" % (safe, info["uri"],
+                                              info.get("fftoken", ""),
+                                              info.get("playtoken", "")),
         }]}
 
     def playerContent(self, flag, pid, vipFlags):
@@ -766,14 +823,14 @@ class AnboSource(object):
         if s.startswith("__ERROR__:"):
             _log("[安博] 播放失败: %s" % s[10:])
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
-
         parts = s.split("|")
         url = parts[0] if parts else ""
         headers = {"User-Agent": "okhttp/3.12.0"}
-        if len(parts) > 1 and parts[1]:
-            headers["fftoken"] = parts[1]
-        if len(parts) > 2 and parts[2]:
-            headers["playtoken"] = parts[2]
+        if len(parts) >= 3:
+            headers["fftoken"] = parts[-2]
+            headers["playtoken"] = parts[-1]
+            url = "|".join(parts[:-2])
+        _log("[安博] 播放 url=%s" % url[:80])
         return {"parse": 0, "jx": 0, "url": url, "header": headers}
 
     def search(self, key):
@@ -783,16 +840,14 @@ class AnboSource(object):
         out = []
         for ch in self._load():
             if key in ch["name"].lower():
-                out.append({
-                    "vod_id": ch["id"], "vod_name": ch["name"],
-                    "vod_pic": ch["logo"] or self.default_logo,
-                    "vod_remarks": ch["category"],
-                })
+                out.append({"vod_id": ch["id"], "vod_name": ch["name"],
+                            "vod_pic": ch["logo"] or self.default_logo,
+                            "vod_remarks": ch["category"]})
         return out
 
 
 # ============================================================
-# 源 3：全球（DreamTV）
+# 源 3：全球
 # ============================================================
 class QuanqiuSource(object):
     PREFIX = "qq"
@@ -818,7 +873,6 @@ class QuanqiuSource(object):
         self.channels_cache = []
         self.cache_time = 0
         self.auth_time = 0
-        self.session = _requests.Session() if HAS_REQ else None
 
     def init(self, extend=""):
         pass
@@ -834,19 +888,17 @@ class QuanqiuSource(object):
                 "Accept-Encoding": "identity"}
 
     def _post(self, payload):
-        if self.session is None:
-            raise Exception("no requests")
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         last_err = "Dream API failed"
         for url in list(self.api_urls):
             try:
-                r = self.session.post(url, data=body.encode("utf-8"),
-                                      headers=self._headers(body),
-                                      timeout=15, verify=False)
-                if r.status_code != 200:
-                    last_err = "HTTP %s" % r.status_code
+                st, txt = _http_post(url, data=body.encode("utf-8"),
+                                     headers=self._headers(body),
+                                     timeout=15)
+                if st != 200:
+                    last_err = "HTTP %s" % st
                     continue
-                j = r.json()
+                j = json.loads(txt)
                 if isinstance(j, dict) and j.get("data") is not None:
                     try:
                         self.api_urls.remove(url)
@@ -856,7 +908,7 @@ class QuanqiuSource(object):
                     return j["data"]
                 last_err = "no data"
             except Exception as e:
-                last_err = str(e)[:80]
+                last_err = "%s: %s" % (type(e).__name__, str(e)[:80])
         raise Exception(last_err)
 
     def _login1(self):
@@ -989,14 +1041,16 @@ class QuanqiuSource(object):
         u = self._play_url(it)
         if not u:
             return None
+        logo = self._logo(it) or _fallback_logo(self._n(it))
         return {"vod_id": u, "vod_name": self._n(it),
-                "vod_pic": self._logo(it), "vod_remarks": self._c(it)}
+                "vod_pic": logo, "vod_remarks": self._c(it)}
 
     def categories(self):
         try:
             self._get_channels()
         except Exception as e:
-            _log("[全球] categories 加载失败: %s" % str(e)[:80])
+            _log("[全球] categories 失败: %s: %s"
+                 % (type(e).__name__, str(e)[:60]))
             return []
         seen = []
         for it in self.channels_cache:
@@ -1009,7 +1063,8 @@ class QuanqiuSource(object):
         try:
             chs = self._get_channels()
         except Exception as e:
-            _log("[全球] 加载失败: %s" % str(e)[:80])
+            _log("[全球] 加载失败: %s: %s"
+                 % (type(e).__name__, str(e)[:60]))
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
         vids = []
@@ -1033,12 +1088,12 @@ class QuanqiuSource(object):
             chs = self.channels_cache
         for it in chs:
             if self._play_url(it) == pid:
-                name, logo = self._n(it), self._logo(it)
+                name = self._n(it)
+                logo = self._logo(it) or _fallback_logo(name)
                 break
         return {"list": [{
             "vod_id": pid, "vod_name": name, "vod_pic": logo,
-            "vod_remarks": "直播",
-            "vod_play_from": self.PLAY_FROM,
+            "vod_remarks": "直播", "vod_play_from": self.PLAY_FROM,
             "vod_play_url": "播放$%s" % pid,
         }]}
 
@@ -1089,10 +1144,12 @@ class Spider(_TVBoxBase):
         return "聚合直播"
 
     def init(self, extend=""):
-        if not HAS_AES:
-            _log("⚠⚠ 未检测到 pycryptodome，安博源无法登录 ⚠⚠")
-        if not HAS_REQ and not HAS_CFFI:
-            _log("⚠ 没有 requests / curl_cffi")
+        _get_http()
+        try:
+            from Crypto.Cipher import AES
+            _log("AES 库: 可用")
+        except ImportError:
+            _log("⚠ 无 pycryptodome，安博无法登录")
         for s in self._sources.values():
             try:
                 s.init(extend)
@@ -1105,70 +1162,58 @@ class Spider(_TVBoxBase):
     def manualVideoCheck(self):
         return False
 
-    # ---------- 首页：3 个板块 + filter 分类条 ----------
+    # 首页平铺所有分类
     def homeContent(self, filter=None):
-        classes = [
-            {"type_id": YushanSource.PREFIX, "type_name": "📺 玉山"},
-            {"type_id": AnboSource.PREFIX, "type_name": "📺 安博"},
-            {"type_id": QuanqiuSource.PREFIX, "type_name": "📺 全球"},
-        ]
-        filters = {}
+        classes = []
         for prefix, src in self._sources.items():
             try:
                 cats = src.categories()
             except Exception as e:
                 _log("[%s] categories 失败: %s" % (src.NAME, e))
                 cats = []
-            vals = [{"n": "全部", "v": "all"}]
+            if not cats:
+                classes.append({
+                    "type_id": "%s%sall" % (prefix, SEP),
+                    "type_name": "📺 %s (未加载)" % src.NAME,
+                })
+                continue
+            classes.append({
+                "type_id": "%s%sall" % (prefix, SEP),
+                "type_name": "📺 %s · 全部" % src.NAME,
+            })
             for c in cats:
-                if c and c not in ("all", "系统提示", "系統提示"):
-                    vals.append({"n": c, "v": c})
-            filters[prefix] = [{"key": "cat", "name": "分类", "value": vals}]
-        return {"class": classes, "filters": filters, "list": []}
+                if not c or c in ("all", "系统提示", "系統提示"):
+                    continue
+                classes.append({
+                    "type_id": "%s%s%s" % (prefix, SEP, c),
+                    "type_name": "📺 %s · %s" % (src.NAME, c),
+                })
+        _log("首页分类数: %d" % len(classes))
+        return {"class": classes, "filters": {}, "list": []}
 
     def homeVideoContent(self):
         return {"list": []}
 
-    # ---------- 分类列表：支持 tid 里带分类名 ----------
     def categoryContent(self, tid, pg, filter, extend):
         tid_s = str(tid).strip()
-        prefix = tid_s
-        target_cat = "all"
-
-        # ★ 如果 tid 里带 ":"，说明分类被编码在 tid 里
-        if ":" in tid_s:
-            p, real = tid_s.split(":", 1)
-            if p in self._sources:
-                prefix = p
-                target_cat = real
-        # 兼容旧 "__" 格式
+        if SEP in tid_s:
+            prefix, cat = tid_s.split(SEP, 1)
         elif "__" in tid_s:
-            p, real = tid_s.split("__", 1)
-            if p in self._sources:
-                prefix = p
-                target_cat = real
-
+            prefix, cat = tid_s.split("__", 1)
+        else:
+            prefix, cat = tid_s, "all"
         src = self._sources.get(prefix)
         if src is None:
             _log("未知板块: %s" % tid_s)
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
-
-        # ★ extend 里的 cat 优先级最高（标准 TVBox 行为）
-        if isinstance(extend, dict):
-            v = extend.get("cat")
-            if v:
-                target_cat = v
-
         try:
-            res = src.categoryContent(target_cat, pg, filter, extend)
+            res = src.categoryContent(cat, pg, filter, extend)
         except Exception as e:
             _log("[%s] categoryContent 失败: %s" % (src.NAME, e))
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
-
         for v in res.get("list", []):
-            # ★ 源没给图就用频道名匹配一张
             if not v.get("vod_pic"):
                 fb = _fallback_logo(v.get("vod_name", ""))
                 if fb:
@@ -1177,12 +1222,11 @@ class Spider(_TVBoxBase):
                 v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
         return res
 
-    # ---------- 详情 ----------
     def detailContent(self, ids):
         if not ids:
             return {"list": []}
         full_id = str(ids[0])
-        prefix, real_id = _split_full_id(full_id)
+        prefix, real_id = _split_id(full_id)
         src = self._sources.get(prefix)
         if src is None:
             return {"list": [{"vod_id": full_id, "vod_name": "未知源",
@@ -1193,16 +1237,14 @@ class Spider(_TVBoxBase):
             _log("[%s] detailContent 失败: %s" % (src.NAME, e))
             return {"list": [{"vod_id": full_id, "vod_name": "详情失败",
                               "vod_content": str(e)}]}
-
         for v in res.get("list", []):
             v["vod_id"] = full_id
             purl = v.get("vod_play_url", "")
             if purl:
-                v["vod_play_url"] = self._prefix_play_url(purl, prefix)
+                v["vod_play_url"] = self._prefix_url(purl, prefix)
             vf = v.get("vod_play_from") or "直播"
             if not vf.startswith("[%s]" % src.NAME):
                 v["vod_play_from"] = "[%s] %s" % (src.NAME, vf)
-            # 详情页也补个图
             if not v.get("vod_pic"):
                 fb = _fallback_logo(v.get("vod_name", ""))
                 if fb:
@@ -1210,7 +1252,7 @@ class Spider(_TVBoxBase):
         return res
 
     @staticmethod
-    def _prefix_play_url(purl, prefix):
+    def _prefix_url(purl, prefix):
         out = []
         for p in str(purl).split("#"):
             if "$" in p:
@@ -1220,33 +1262,31 @@ class Spider(_TVBoxBase):
                 out.append(p)
         return "#".join(out)
 
-    # ---------- 播放 ----------
     def playerContent(self, flag, pid, vipFlags):
         full_pid = str(pid or "")
-        if ":" in full_pid:
-            prefix, real_pid = full_pid.split(":", 1)
+        if "$" in full_pid:
+            full_pid = full_pid.split("$", 1)[1]
+        if SEP in full_pid:
+            prefix, real_pid = full_pid.split(SEP, 1)
         elif "__" in full_pid:
             prefix, real_pid = full_pid.split("__", 1)
         else:
             prefix, real_pid = "", full_pid
-
         src = self._sources.get(prefix)
         if src is None:
-            _log("未知源前缀: %s (完整 pid=%s)" % (prefix, full_pid[:80]))
+            _log("未知源: %s (pid=%s)" % (prefix, full_pid[:80]))
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
-
         try:
             return src.playerContent(flag, real_pid, vipFlags)
         except Exception as e:
             _log("[%s] playerContent 失败: %s" % (src.NAME, e))
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
-    # ---------- 搜索 ----------
     def searchContent(self, key, quick, pg="1"):
         key = str(key or "").strip()
         if not key:
             return {"list": []}
-        all_videos = []
+        out = []
         for prefix, src in self._sources.items():
             try:
                 arr = src.search(key)
@@ -1262,8 +1302,8 @@ class Spider(_TVBoxBase):
                     v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
                 v["vod_remarks"] = "[%s] %s" % (src.NAME,
                                                 v.get("vod_remarks") or "直播")
-                all_videos.append(v)
-        return {"list": all_videos}
+                out.append(v)
+        return {"list": out}
 
     def searchContentPage(self, keywords, quick, page):
         return self.searchContent(keywords, quick, page)
@@ -1275,13 +1315,6 @@ class Spider(_TVBoxBase):
         return ""
 
     def destroy(self):
-        for s in self._sources.values():
-            sess = getattr(s, "session", None)
-            if sess is not None:
-                try:
-                    sess.close()
-                except Exception:
-                    pass
         return "正在Destroy"
 
 
