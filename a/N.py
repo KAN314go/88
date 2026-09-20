@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # TVBox 聚合直播源：玉山 + 安博 + 全球
-# 首页显示 3 个板块，点进去用 filter 条切换分类
+# 首页显示 3 个板块，点进去用 filter 切换分类
 
-import sys
 import os
 import re
+import sys
 import time
 import json
 import gzip
@@ -47,11 +47,12 @@ except ImportError:
             pass
 
 
-# 全局分隔符：源前缀与真实 id 之间用 ":"（避免与 URL 里的 / ? # 冲突）
 SEP = ":"
 UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/131.0.0.0 Safari/537.36")
+
+_LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
 
 
 def _log(msg):
@@ -59,16 +60,53 @@ def _log(msg):
 
 
 def _split_full_id(full_id):
-    """拆分 'ys:live#5' → ('ys', 'live#5')，只 split 一次"""
     s = str(full_id or "")
     if ":" in s:
-        prefix, real = s.split(":", 1)
-        return prefix, real
-    # 兼容老格式 __
+        p, r = s.split(":", 1)
+        return p, r
     if "__" in s:
-        prefix, real = s.split("__", 1)
-        return prefix, real
+        p, r = s.split("__", 1)
+        return p, r
     return "", s
+
+
+# ============ 全局台标兜底（主类用）============
+def _fallback_logo(name):
+    if not name:
+        return ""
+    n = re.sub(
+        r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080)$',
+        '', str(name).strip(), flags=re.IGNORECASE)
+    norm = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', n).upper()
+    if not norm:
+        return ""
+
+    # CCTV 系列
+    m = re.search(r'CCTV(\d+)(\+|PLUS)?', norm)
+    if m:
+        return _LOGO_CDN.format("CCTV" + m.group(1) + ("+" if m.group(2) else ""))
+
+    # 别名表
+    alias = {
+        "凤凰中文": "凤凰卫视中文台", "凤凰资讯": "凤凰卫视资讯台",
+        "凤凰香港": "凤凰卫视香港台", "凤凰电影": "凤凰卫视电影台",
+        "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
+        "TVB": "翡翠台", "VIUTV": "ViuTV", "HOYTV": "HOY TV",
+        "民视": "民视新闻台", "中天": "中天新闻台", "东森": "东森新闻台",
+        "三立": "三立新闻台", "TVBS": "TVBS新闻台", "年代": "年代新闻",
+        "八大": "八大第一台", "非凡": "非凡新闻台", "纬来": "纬来综合台",
+        "龙华": "龙华偶像台", "大爱": "大爱一台",
+        "翡翠台": "翡翠台", "明珠台": "明珠台",
+    }
+    for k in sorted(alias, key=len, reverse=True):
+        if k.upper() in norm:
+            return _LOGO_CDN.format(urllib.parse.quote(alias[k]))
+
+    # 含"卫视"的直接拿去试
+    if "卫视" in str(name) or "卫视" in norm:
+        return _LOGO_CDN.format(urllib.parse.quote(str(name).strip()))
+
+    return ""
 
 
 # ============================================================
@@ -154,7 +192,6 @@ class YushanSource(object):
         except Exception:
             pass
 
-    # ---------- 工具 ----------
     @staticmethod
     def _clean(name):
         return re.sub(r'\s*\[[^\]]*\]\s*$', '', str(name or '')).strip()
@@ -171,7 +208,6 @@ class YushanSource(object):
                     return cat
         return "国际"
 
-    # ---------- 网络 ----------
     def _fetch(self):
         h = dict(self.FETCH_HEADERS)
         if HAS_CFFI:
@@ -222,7 +258,6 @@ class YushanSource(object):
                 tvg = m.group(1).strip() if m else ""
                 m = re.search(r'tvg-logo="([^"]*)"', line)
                 logo = m.group(1).strip() if m else ""
-                # 从最后一个引号后取逗号
                 display = ""
                 last_q = line.rfind('"')
                 if last_q >= 0:
@@ -268,7 +303,8 @@ class YushanSource(object):
                 continue
             rec = {"name": display, "url": item["url"], "logo": item["logo"],
                    "ua": item["ua"], "referer": item["referer"]}
-            if item["tvg"] in self.RESTRICTED_NAMES or display in self.RESTRICTED_NAMES:
+            if (item["tvg"] in self.RESTRICTED_NAMES
+                    or display in self.RESTRICTED_NAMES):
                 restricted.append(rec)
                 continue
             cat = self._detect_cat(display or item["tvg"])
@@ -285,6 +321,7 @@ class YushanSource(object):
         if restricted:
             ordered.append(("限制", restricted))
         self._channels = ordered
+        _log("[玉山] 分组完成: %d 组" % len(ordered))
         return ordered
 
     def _flat(self):
@@ -299,10 +336,13 @@ class YushanSource(object):
         self._flat = arr
         return arr
 
-    # ---------- 子源接口 ----------
     def categories(self):
-        """给 homeContent 用的分类列表（不触发 M3U 拉取）"""
-        return list(self.CATEGORY_ORDER)
+        # ★ 从实际解析出的分组里提取，避免空分类
+        try:
+            cats = [cat for cat, lst in self._load() if lst]
+        except Exception:
+            cats = list(self.CATEGORY_ORDER)
+        return cats
 
     def categoryContent(self, tid, pg, filter, extend):
         tid = str(tid).strip()
@@ -397,17 +437,13 @@ class AnboSource(object):
         self.channels = []
         self.categories = []
         self.default_logo = "https://img.icons8.com/color/48/tv.png"
-
-        # token 缓存（★ 修复）
         self._token = None
         self._token_time = 0
-
         self.session = _requests.Session() if HAS_REQ else None
 
     def init(self, extend=""):
         pass
 
-    # ---------- 加密 ----------
     @staticmethod
     def _rand(n):
         c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -521,13 +557,15 @@ class AnboSource(object):
                 j = r.json()
                 d = json.loads(self._dec(j.get("sign"), j.get("iv")))
                 if str(d.get("return_code")) == "99":
+                    _log("[安博] token 成功")
                     return d.get("return_token")
+                else:
+                    _log("[安博] token return_code=%s" % d.get("return_code"))
         except Exception as e:
-            _log("[安博] token err: %s" % str(e)[:60])
+            _log("[安博] token err: %s" % str(e)[:80])
         return None
 
     def _ensure_token(self):
-        # ★ 30 分钟内复用
         if self._token and (time.time() - self._token_time) < 1800:
             return self._token
         self._token = self._fetch_token()
@@ -561,12 +599,13 @@ class AnboSource(object):
                         return {"uri": d.get("return_uri"),
                                 "fftoken": d.get("return_fftoken") or "",
                                 "playtoken": d.get("return_playtoken") or ""}
+                    else:
+                        _log("[安博] uri return_code=%s" % d.get("return_code"))
                 time.sleep(0.2)
         except Exception as e:
-            _log("[安博] uri err: %s" % str(e)[:60])
+            _log("[安博] uri err: %s" % str(e)[:80])
         return None
 
-    # ---------- 加载 ----------
     def _load_json(self, loc, fname):
         if str(loc).startswith(("http://", "https://")):
             if self.session is None:
@@ -610,15 +649,33 @@ class AnboSource(object):
     def _load(self):
         if self.channels:
             return self.channels
+
+        # ★ 打印实际路径，方便排查
+        try:
+            cur_file = os.path.abspath(__file__)
+        except Exception:
+            cur_file = "(无 __file__)"
+        _log("[安博] 当前文件: %s" % cur_file)
+        _log("[安博] base_dir: %s" % self.base_dir)
+
         arr = []
         cats_order = []
-        for d in [self.base_dir, "/sdcard/tvbox/py/", "/sdcard/Download/",
-                  "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py/"]:
+        dirs = [
+            "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py/",
+            self.base_dir,
+            "/sdcard/tvbox/py/",
+            "/sdcard/Download/",
+            "/sdcard/",
+            "/storage/emulated/0/tvbox/py/",
+            "/storage/emulated/0/Download/",
+        ]
+
+        for d in dirs:
             for fn in ("channels.json", "extra.json"):
                 data = self._load_json(d, fn)
                 if not data:
                     continue
-                _log("[安博] 加载 %s/%s" % (d, fn))
+                _log("[安博] ✓ 命中 %s/%s" % (d, fn))
                 for cat in data.get("return_live", []):
                     g = str(cat.get("name", "未分類")).strip()
                     if g not in cats_order:
@@ -628,18 +685,23 @@ class AnboSource(object):
                         ct = str(ch.get("title", "")).strip()
                         if not cid or not ct:
                             continue
-                        cl = str(ch.get("logo", "")).strip() or self._match_logo(ct)
-                        arr.append({"id": cid, "name": ct, "category": g,
-                                    "logo": cl})
+                        cl = str(ch.get("logo", "")).strip() \
+                            or self._match_logo(ct)
+                        arr.append({"id": cid, "name": ct,
+                                    "category": g, "logo": cl})
+
         if not arr:
-            arr.append({"id": "1", "name": "未偵測到 channels.json",
-                        "category": "系統提示", "logo": self.default_logo})
-            cats_order.append("系統提示")
+            _log("[安博] ⚠ 一个 JSON 都没命中")
+            arr = [{"id": "1", "name": "未偵測到 channels.json",
+                    "category": "系統提示", "logo": self.default_logo}]
+            cats_order = ["系統提示"]
+        else:
+            _log("[安博] 共 %d 频道 / %d 分类" % (len(arr), len(cats_order)))
+
         self.channels = arr
         self.categories = cats_order
         return arr
 
-    # ---------- 接口 ----------
     def categories(self):
         self._load()
         return list(self.categories)
@@ -678,6 +740,7 @@ class AnboSource(object):
                 "vod_play_from": self.PLAY_FROM,
                 "vod_play_url": "播放$__ERROR__:登录失败",
             }]}
+        _log("[安博] 请求频道 %s 播放地址..." % cid)
         info = self._get_uri(token, cid)
         if not info or not info.get("uri"):
             return {"list": [{
@@ -686,8 +749,6 @@ class AnboSource(object):
                 "vod_play_from": self.PLAY_FROM,
                 "vod_play_url": "播放$__ERROR__:拿不到播放地址",
             }]}
-        # 关键：vod_play_url 里的 pid 编码成 "id|fftoken|playtoken"
-        # 但需要保证 pid 里不含 "$" 或 "#"
         u = info["uri"]
         ff = info.get("fftoken", "") or ""
         pt = info.get("playtoken", "") or ""
@@ -705,6 +766,7 @@ class AnboSource(object):
         if s.startswith("__ERROR__:"):
             _log("[安博] 播放失败: %s" % s[10:])
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
+
         parts = s.split("|")
         url = parts[0] if parts else ""
         headers = {"User-Agent": "okhttp/3.12.0"}
@@ -761,13 +823,11 @@ class QuanqiuSource(object):
     def init(self, extend=""):
         pass
 
-    # ---------- 签名 ----------
     def _sign(self, ts, m):
         return hashlib.md5((self.from_id + self.salt + str(ts) + m
                             + self.devid).encode("utf-8")).hexdigest()
 
     def _headers(self, body):
-        # ★ 不再手动填 Content-Length
         return {"Content-Type": "application/json; charset=utf-8",
                 "Connection": "Keep-Alive",
                 "User-Agent": "okhttp/3.12.5",
@@ -788,7 +848,6 @@ class QuanqiuSource(object):
                     continue
                 j = r.json()
                 if isinstance(j, dict) and j.get("data") is not None:
-                    # 成功域名提到最前
                     try:
                         self.api_urls.remove(url)
                         self.api_urls.insert(0, url)
@@ -872,9 +931,9 @@ class QuanqiuSource(object):
         self.channels_cache = chs
         self.cache_time = time.time()
         self.auth_time = time.time()
+        _log("[全球] 拿到 %d 频道" % len(chs))
         return chs
 
-    # ---------- 字段 ----------
     @staticmethod
     def _n(it):
         return str(it.get("name") or it.get("title")
@@ -893,94 +952,7 @@ class QuanqiuSource(object):
                    or it.get("stream_url") or "") \
             if isinstance(it, dict) else ""
 
-    _KEYWORD_LOGOS = {
-        "CCTV5PLUS": "CCTV5+", "CCTV5+": "CCTV5+",
-        "CCTV5体育": "CCTV5", "CCTV5": "CCTV5",
-        "CCTV1综合": "CCTV1", "CCTV1": "CCTV1",
-        "CCTV2财经": "CCTV2", "CCTV2": "CCTV2",
-        "CCTV3综艺": "CCTV3", "CCTV3": "CCTV3",
-        "CCTV4中文国际": "CCTV4", "CCTV4": "CCTV4",
-        "CCTV6电影": "CCTV6", "CCTV6": "CCTV6",
-        "CCTV7军事": "CCTV7", "CCTV7": "CCTV7",
-        "CCTV8电视剧": "CCTV8", "CCTV8": "CCTV8",
-        "CCTV9纪录": "CCTV9", "CCTV9": "CCTV9",
-        "CCTV10科教": "CCTV10", "CCTV10": "CCTV10",
-        "CCTV11戏曲": "CCTV11", "CCTV11": "CCTV11",
-        "CCTV12社会与法": "CCTV12", "CCTV12": "CCTV12",
-        "CCTV13新闻": "CCTV13", "CCTV13": "CCTV13",
-        "CCTV14少儿": "CCTV14", "CCTV14": "CCTV14",
-        "CCTV15音乐": "CCTV15", "CCTV15": "CCTV15",
-        "CCTV16奥林匹克": "CCTV16", "CCTV16": "CCTV16",
-        "CCTV17农业": "CCTV17", "CCTV17": "CCTV17",
-        "湖南卫视": "湖南卫视", "浙江卫视": "浙江卫视",
-        "江苏卫视": "江苏卫视", "东方卫视": "东方卫视",
-        "北京卫视": "北京卫视", "安徽卫视": "安徽卫视",
-        "山东卫视": "山东卫视", "广东卫视": "广东卫视",
-        "深圳卫视": "深圳卫视", "天津卫视": "天津卫视",
-        "湖北卫视": "湖北卫视", "四川卫视": "四川卫视",
-        "重庆卫视": "重庆卫视", "辽宁卫视": "辽宁卫视",
-        "黑龙江卫视": "黑龙江卫视", "吉林卫视": "吉林卫视",
-        "河南卫视": "河南卫视", "河北卫视": "河北卫视",
-        "山西卫视": "山西卫视", "陕西卫视": "陕西卫视",
-        "甘肃卫视": "甘肃卫视", "宁夏卫视": "宁夏卫视",
-        "青海卫视": "青海卫视", "新疆卫视": "新疆卫视",
-        "西藏卫视": "西藏卫视", "云南卫视": "云南卫视",
-        "贵州卫视": "贵州卫视", "广西卫视": "广西卫视",
-        "海南卫视": "海南卫视", "东南卫视": "东南卫视",
-        "江西卫视": "江西卫视", "内蒙古卫视": "内蒙古卫视",
-        "厦门卫视": "厦门卫视", "延边卫视": "延边卫视",
-        "兵团卫视": "兵团卫视",
-        "翡翠台": "翡翠台", "明珠台": "明珠台",
-        "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
-        "TVB": "翡翠台", "J2": "J2",
-        "VIUTV": "ViuTV", "HOYTV": "HOY TV",
-        "凤凰卫视中文台": "凤凰卫视中文台",
-        "凤凰卫视资讯台": "凤凰卫视资讯台",
-        "凤凰卫视香港台": "凤凰卫视香港台",
-        "凤凰卫视电影台": "凤凰卫视电影台",
-        "凤凰中文": "凤凰卫视中文台",
-        "凤凰资讯": "凤凰卫视资讯台",
-        "凤凰香港": "凤凰卫视香港台",
-        "凤凰电影": "凤凰卫视电影台",
-        "澳视澳门": "澳视澳门", "澳门莲花": "澳门莲花卫视",
-        "民视": "民视新闻台", "中视": "中视", "华视": "华视",
-        "台视": "台视", "公视": "公视", "大爱": "大爱一台",
-        "中天": "中天新闻台", "东森": "东森新闻台",
-        "三立": "三立新闻台", "TVBS": "TVBS新闻台",
-        "年代": "年代新闻", "八大": "八大第一台",
-        "非凡": "非凡新闻台", "纬来": "纬来综合台",
-        "龙华": "龙华偶像台",
-        "上海新闻综合": "上海新闻综合", "上海东方卫视": "东方卫视",
-        "湖南经视": "湖南经视", "江苏城市": "江苏城市",
-        "北京新闻": "北京新闻", "广东珠江": "广东珠江",
-        "南方卫视": "南方卫视", "深圳都市": "深圳都市频道",
-    }
-    _SORTED_KEYS = None
-    LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
-
-    def _norm(self, n):
-        if not n:
-            return ""
-        n = str(n).strip()
-        for _ in range(2):
-            n = re.sub(r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080)$',
-                       '', n, flags=re.IGNORECASE)
-        return re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', n).upper()
-
-    def _match_kw(self, n):
-        if QuanqiuSource._SORTED_KEYS is None:
-            QuanqiuSource._SORTED_KEYS = sorted(
-                self._KEYWORD_LOGOS.keys(), key=len, reverse=True)
-        norm = self._norm(n)
-        if not norm:
-            return ""
-        for k in QuanqiuSource._SORTED_KEYS:
-            if k in norm:
-                return self._KEYWORD_LOGOS[k]
-        return ""
-
     def _logo(self, it):
-        name = self._n(it)
         raw = str(it.get("logo") or it.get("pic")
                   or it.get("icon") or "").strip() \
             if isinstance(it, dict) else ""
@@ -990,9 +962,6 @@ class QuanqiuSource(object):
             if self.server:
                 return self.server.rstrip("/") + "/" + raw.lstrip("/")
             return raw
-        mk = self._match_kw(name)
-        if mk:
-            return self.LOGO_CDN.format(urllib.parse.quote(mk))
         return ""
 
     def _join(self, server, path):
@@ -1023,12 +992,12 @@ class QuanqiuSource(object):
         return {"vod_id": u, "vod_name": self._n(it),
                 "vod_pic": self._logo(it), "vod_remarks": self._c(it)}
 
-    # ---------- 接口 ----------
     def categories(self):
         try:
             self._get_channels()
-        except Exception:
-            pass
+        except Exception as e:
+            _log("[全球] categories 加载失败: %s" % str(e)[:80])
+            return []
         seen = []
         for it in self.channels_cache:
             c = self._c(it)
@@ -1120,6 +1089,10 @@ class Spider(_TVBoxBase):
         return "聚合直播"
 
     def init(self, extend=""):
+        if not HAS_AES:
+            _log("⚠⚠ 未检测到 pycryptodome，安博源无法登录 ⚠⚠")
+        if not HAS_REQ and not HAS_CFFI:
+            _log("⚠ 没有 requests / curl_cffi")
         for s in self._sources.values():
             try:
                 s.init(extend)
@@ -1132,12 +1105,12 @@ class Spider(_TVBoxBase):
     def manualVideoCheck(self):
         return False
 
-    # ---------- 首页：3 个板块 + 各自的 filter 分类条 ----------
+    # ---------- 首页：3 个板块 + filter 分类条 ----------
     def homeContent(self, filter=None):
         classes = [
-            {"type_id": YushanSource.PREFIX, "type_name": "📺 " + YushanSource.NAME},
-            {"type_id": AnboSource.PREFIX, "type_name": "📺 " + AnboSource.NAME},
-            {"type_id": QuanqiuSource.PREFIX, "type_name": "📺 " + QuanqiuSource.NAME},
+            {"type_id": YushanSource.PREFIX, "type_name": "📺 玉山"},
+            {"type_id": AnboSource.PREFIX, "type_name": "📺 安博"},
+            {"type_id": QuanqiuSource.PREFIX, "type_name": "📺 全球"},
         ]
         filters = {}
         for prefix, src in self._sources.items():
@@ -1148,7 +1121,7 @@ class Spider(_TVBoxBase):
                 cats = []
             vals = [{"n": "全部", "v": "all"}]
             for c in cats:
-                if c and c != "all":
+                if c and c not in ("all", "系统提示", "系統提示"):
                     vals.append({"n": c, "v": c})
             filters[prefix] = [{"key": "cat", "name": "分类", "value": vals}]
         return {"class": classes, "filters": filters, "list": []}
@@ -1156,21 +1129,32 @@ class Spider(_TVBoxBase):
     def homeVideoContent(self):
         return {"list": []}
 
-    # ---------- 分类列表：根据 extend.cat 筛选 ----------
+    # ---------- 分类列表：支持 tid 里带分类名 ----------
     def categoryContent(self, tid, pg, filter, extend):
-        prefix = str(tid).strip()
+        tid_s = str(tid).strip()
+        prefix = tid_s
+        target_cat = "all"
+
+        # ★ 如果 tid 里带 ":"，说明分类被编码在 tid 里
+        if ":" in tid_s:
+            p, real = tid_s.split(":", 1)
+            if p in self._sources:
+                prefix = p
+                target_cat = real
+        # 兼容旧 "__" 格式
+        elif "__" in tid_s:
+            p, real = tid_s.split("__", 1)
+            if p in self._sources:
+                prefix = p
+                target_cat = real
+
         src = self._sources.get(prefix)
         if src is None:
-            # 兼容带 ":" 的旧格式
-            p, real = _split_full_id(tid)
-            src = self._sources.get(p)
-            if src is None:
-                return {"list": [], "page": 1, "pagecount": 1,
-                        "limit": 0, "total": 0}
-            target_cat = real or "all"
-        else:
-            target_cat = "all"
+            _log("未知板块: %s" % tid_s)
+            return {"list": [], "page": 1, "pagecount": 1,
+                    "limit": 0, "total": 0}
 
+        # ★ extend 里的 cat 优先级最高（标准 TVBox 行为）
         if isinstance(extend, dict):
             v = extend.get("cat")
             if v:
@@ -1183,8 +1167,12 @@ class Spider(_TVBoxBase):
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
 
-        # 给每个 vod_id 加前缀
         for v in res.get("list", []):
+            # ★ 源没给图就用频道名匹配一张
+            if not v.get("vod_pic"):
+                fb = _fallback_logo(v.get("vod_name", ""))
+                if fb:
+                    v["vod_pic"] = fb
             if v.get("vod_id"):
                 v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
         return res
@@ -1214,11 +1202,15 @@ class Spider(_TVBoxBase):
             vf = v.get("vod_play_from") or "直播"
             if not vf.startswith("[%s]" % src.NAME):
                 v["vod_play_from"] = "[%s] %s" % (src.NAME, vf)
+            # 详情页也补个图
+            if not v.get("vod_pic"):
+                fb = _fallback_logo(v.get("vod_name", ""))
+                if fb:
+                    v["vod_pic"] = fb
         return res
 
     @staticmethod
     def _prefix_play_url(purl, prefix):
-        """给 vod_play_url 里每个 '名称$pid' 的 pid 加前缀 'prefix:'"""
         out = []
         for p in str(purl).split("#"):
             if "$" in p:
@@ -1231,18 +1223,25 @@ class Spider(_TVBoxBase):
     # ---------- 播放 ----------
     def playerContent(self, flag, pid, vipFlags):
         full_pid = str(pid or "")
-        prefix, real_pid = _split_full_id(full_pid)
+        if ":" in full_pid:
+            prefix, real_pid = full_pid.split(":", 1)
+        elif "__" in full_pid:
+            prefix, real_pid = full_pid.split("__", 1)
+        else:
+            prefix, real_pid = "", full_pid
+
         src = self._sources.get(prefix)
         if src is None:
             _log("未知源前缀: %s (完整 pid=%s)" % (prefix, full_pid[:80]))
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
+
         try:
             return src.playerContent(flag, real_pid, vipFlags)
         except Exception as e:
             _log("[%s] playerContent 失败: %s" % (src.NAME, e))
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
-    # ---------- 搜索：三源聚合 ----------
+    # ---------- 搜索 ----------
     def searchContent(self, key, quick, pg="1"):
         key = str(key or "").strip()
         if not key:
@@ -1255,6 +1254,10 @@ class Spider(_TVBoxBase):
                 _log("[%s] search 失败: %s" % (src.NAME, e))
                 continue
             for v in arr:
+                if not v.get("vod_pic"):
+                    fb = _fallback_logo(v.get("vod_name", ""))
+                    if fb:
+                        v["vod_pic"] = fb
                 if v.get("vod_id"):
                     v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
                 v["vod_remarks"] = "[%s] %s" % (src.NAME,
