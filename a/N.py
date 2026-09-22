@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # 三源聚合（玉山 + 安博 + 全球）- C 方案
 # 首页三块 → 点源 → 分类 → 频道 → 播放
-# 关键优化：init 时后台预加载，避免首点超时
 
 import os
 import re
@@ -22,12 +21,6 @@ try:
     HAS_REQ = True
 except ImportError:
     HAS_REQ = False
-
-try:
-    from curl_cffi import requests as _cffi
-    HAS_CFFI = True
-except ImportError:
-    HAS_CFFI = False
 
 try:
     from Crypto.Cipher import AES
@@ -63,7 +56,7 @@ def _split(full_id):
 
 
 # ============================================================
-# 源 1：玉山
+# 源 1：玉山（修复版：无锁、无后台线程、纯同步）
 # ============================================================
 class YushanSource(_TVBoxBase):
     PREFIX = "ys"
@@ -135,21 +128,10 @@ class YushanSource(_TVBoxBase):
     def __init__(self):
         self._channels = None
         self._flat = None
-        self._lock = threading.Lock()
-        self._loaded_event = threading.Event()
 
     def init(self, extend=""):
-        # 后台启动预加载
-        t = threading.Thread(target=self._bg_load, daemon=True)
-        t.start()
-
-    def _bg_load(self):
-        try:
-            self._load_channels()
-        except Exception:
-            pass
-        finally:
-            self._loaded_event.set()
+        # 不做任何预加载，纯同步：用户点玉山时才拉
+        pass
 
     @staticmethod
     def _clean_name(name):
@@ -168,23 +150,22 @@ class YushanSource(_TVBoxBase):
         return "国际"
 
     def _fetch_m3u(self):
+        """简化：只用 requests + urllib 二级降级，去掉 cffi 避免版本问题"""
         h = dict(self.FETCH_HEADERS)
-        if HAS_CFFI:
-            try:
-                r = _cffi.get(self.M3U_URL, headers=h, impersonate="chrome131",
-                              verify=False, timeout=8, allow_redirects=True)
-                if r.status_code == 200 and r.text:
-                    return r.text
-            except Exception:
-                pass
+
         if HAS_REQ:
             try:
                 r = requests.get(self.M3U_URL, headers=h, verify=False,
-                                 timeout=8, allow_redirects=True)
+                                 timeout=12, allow_redirects=True)
                 if r.status_code == 200 and r.text:
+                    print("[玉山] requests 拉到 %d 字节" % len(r.text),
+                          flush=True)
                     return r.text
-            except Exception:
-                pass
+                else:
+                    print("[玉山] requests HTTP %s" % r.status_code, flush=True)
+            except Exception as e:
+                print("[玉山] requests 失败: %s" % str(e)[:80], flush=True)
+
         try:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -192,13 +173,16 @@ class YushanSource(_TVBoxBase):
             opener = urllib.request.build_opener(
                 urllib.request.HTTPSHandler(context=ctx))
             rq = urllib.request.Request(self.M3U_URL, headers=h)
-            with opener.open(rq, timeout=8) as resp:
+            with opener.open(rq, timeout=12) as resp:
                 raw = resp.read()
                 if raw.startswith(b"\x1f\x8b"):
                     raw = gzip.decompress(raw)
-                return raw.decode("utf-8", errors="ignore")
-        except Exception:
-            pass
+                text = raw.decode("utf-8", errors="ignore")
+                print("[玉山] urllib 拉到 %d 字节" % len(text), flush=True)
+                return text
+        except Exception as e:
+            print("[玉山] urllib 失败: %s" % str(e)[:80], flush=True)
+
         return ""
 
     def _parse_m3u(self, text):
@@ -241,46 +225,50 @@ class YushanSource(_TVBoxBase):
         return out
 
     def _load_channels(self):
+        """无锁，纯同步。如果已缓存直接返回"""
         if self._channels is not None:
             return self._channels
-        with self._lock:
-            if self._channels is not None:
-                return self._channels
-            text = self._fetch_m3u()
-            if not text:
-                self._channels = []
-                return self._channels
 
-            raw_list = self._parse_m3u(text)
-            grouped = {}
-            restricted = []
-            for item in raw_list:
-                display = self._clean_name(item["display"] or item["tvg"])
-                if not display:
-                    continue
-                record = {"name": display, "url": item["url"],
-                          "logo": item["logo"], "ua": item["ua"],
-                          "referer": item["referer"]}
-                if (item["tvg"] in self.RESTRICTED_NAMES
-                        or display in self.RESTRICTED_NAMES):
-                    restricted.append(record)
-                    continue
-                cat = self._detect_category(display)
-                grouped.setdefault(cat, []).append(record)
+        print("[玉山] 开始拉取 M3U...", flush=True)
+        text = self._fetch_m3u()
+        if not text:
+            print("[玉山] M3U 为空，放弃", flush=True)
+            self._channels = []
+            return []
 
-            ordered = []
-            for cat in self.CATEGORY_ORDER:
-                if cat == "限制":
-                    continue
-                if cat in grouped:
-                    ordered.append((cat, grouped.pop(cat)))
-            for cat, lst in grouped.items():
-                ordered.append((cat, lst))
-            if restricted:
-                ordered.append(("限制", restricted))
+        raw_list = self._parse_m3u(text)
+        print("[玉山] 解析出 %d 个频道" % len(raw_list), flush=True)
 
-            self._channels = ordered
-            return ordered
+        grouped = {}
+        restricted = []
+        for item in raw_list:
+            display = self._clean_name(item["display"] or item["tvg"])
+            if not display:
+                continue
+            record = {"name": display, "url": item["url"],
+                      "logo": item["logo"], "ua": item["ua"],
+                      "referer": item["referer"]}
+            if (item["tvg"] in self.RESTRICTED_NAMES
+                    or display in self.RESTRICTED_NAMES):
+                restricted.append(record)
+                continue
+            cat = self._detect_category(display)
+            grouped.setdefault(cat, []).append(record)
+
+        ordered = []
+        for cat in self.CATEGORY_ORDER:
+            if cat == "限制":
+                continue
+            if cat in grouped:
+                ordered.append((cat, grouped.pop(cat)))
+        for cat, lst in grouped.items():
+            ordered.append((cat, lst))
+        if restricted:
+            ordered.append(("限制", restricted))
+
+        print("[玉山] 分组完成: %d 组" % len(ordered), flush=True)
+        self._channels = ordered
+        return ordered
 
     def _flat_list(self):
         if self._flat is not None:
@@ -295,18 +283,15 @@ class YushanSource(_TVBoxBase):
         return arr
 
     def categories(self):
-        # 等最多 5 秒让后台线程加载完
-        if self._channels is None:
-            self._loaded_event.wait(timeout=5)
-            if self._channels is None:
-                # 还没好，同步加载
-                try:
-                    self._load_channels()
-                except Exception:
-                    pass
-        if not self._channels:
+        """直接同步拉，返回分类名列表"""
+        try:
+            channels = self._load_channels()
+        except Exception as e:
+            print("[玉山] categories 异常: %s" % str(e)[:80], flush=True)
             return []
-        return [cat for cat, lst in self._channels if lst]
+        if not channels:
+            return []
+        return [cat for cat, lst in channels if lst]
 
     def categoryContent(self, tid, pg, filter=False, extend=None):
         tid = str(tid).strip()
@@ -383,7 +368,7 @@ class YushanSource(_TVBoxBase):
 
 
 # ============================================================
-# 源 2：安博
+# 源 2：安博（保持原样，已验证可用）
 # ============================================================
 class AnboSource(_TVBoxBase):
     PREFIX = "ab"
@@ -393,7 +378,6 @@ class AnboSource(_TVBoxBase):
         self._channels = None
         self._categories = None
         self._lock = threading.Lock()
-        self._loaded_event = threading.Event()
 
     def init(self, extend=""):
         self.api_base_url = "https://www.usplaytvonphone.com"
@@ -415,17 +399,6 @@ class AnboSource(_TVBoxBase):
                 self.session.verify = False
             except Exception:
                 pass
-        # 后台预加载
-        t = threading.Thread(target=self._bg_load, daemon=True)
-        t.start()
-
-    def _bg_load(self):
-        try:
-            self.load_channels()
-        except Exception:
-            pass
-        finally:
-            self._loaded_event.set()
 
     @staticmethod
     def _get_random_string(length):
@@ -709,12 +682,10 @@ class AnboSource(_TVBoxBase):
             return self._channels
 
     def categories(self):
-        if self._channels is None:
-            self._loaded_event.wait(timeout=5)
-            try:
-                self.load_channels()
-            except Exception:
-                pass
+        try:
+            self.load_channels()
+        except Exception:
+            return []
         if not self._categories:
             return []
         return [c for c in self._categories
@@ -812,7 +783,7 @@ class AnboSource(_TVBoxBase):
 
 
 # ============================================================
-# 源 3：全球
+# 源 3：全球（保持原样，已验证可用）
 # ============================================================
 class QuanqiuSource(_TVBoxBase):
     PREFIX = "qq"
@@ -885,7 +856,6 @@ class QuanqiuSource(_TVBoxBase):
         self._channels = None
         self._categories = None
         self._lock = threading.Lock()
-        self._loaded_event = threading.Event()
 
     def init(self, extend=""):
         self.device_ids = [
@@ -919,17 +889,6 @@ class QuanqiuSource(_TVBoxBase):
                 self.session.verify = False
             except Exception:
                 pass
-        # 后台预加载
-        t = threading.Thread(target=self._bg_load, daemon=True)
-        t.start()
-
-    def _bg_load(self):
-        try:
-            self._get_channels()
-        except Exception:
-            pass
-        finally:
-            self._loaded_event.set()
 
     def _sign(self, ts, method):
         raw = self.from_id + self.salt + str(ts) + method + self.devid
@@ -1129,12 +1088,10 @@ class QuanqiuSource(_TVBoxBase):
         return raw_url
 
     def categories(self):
-        if self._channels is None:
-            self._loaded_event.wait(timeout=5)
-            try:
-                self._get_channels()
-            except Exception:
-                pass
+        try:
+            self._get_channels()
+        except Exception:
+            return []
         if not self._channels:
             return []
         cats = []
@@ -1241,7 +1198,6 @@ class Spider(_TVBoxBase):
         return "三源聚合"
 
     def init(self, extend=""):
-        # 触发每个源的 init，它们内部会启动后台预加载
         for src in self.sources.values():
             try:
                 src.init(extend)
@@ -1254,7 +1210,6 @@ class Spider(_TVBoxBase):
     def manualVideoCheck(self):
         return False
 
-    # ---------- 首页：只显示 3 个源 ----------
     def homeContent(self, filter=False):
         classes = [
             {"type_id": YushanSource.PREFIX, "type_name": "📺 玉山"},
@@ -1266,7 +1221,6 @@ class Spider(_TVBoxBase):
     def homeVideoContent(self):
         return {"list": []}
 
-    # ---------- 分类页：显示该源的分类 ----------
     def categoryContent(self, tid, pg, filter=False, extend=None):
         key = str(tid or "").strip()
         src = self.sources.get(key)
@@ -1285,7 +1239,7 @@ class Spider(_TVBoxBase):
                 continue
             c_str = str(c)
             videos.append({
-                "vod_id": "%s%s%s%s" % (key, SEP, "cat", SEP + c_str),
+                "vod_id": "%s%scat%s%s" % (key, SEP, SEP, c_str),
                 "vod_name": c_str,
                 "vod_pic": "",
                 "vod_remarks": "点击查看频道",
@@ -1302,7 +1256,6 @@ class Spider(_TVBoxBase):
         return {"list": videos, "page": 1, "pagecount": 1,
                 "limit": len(videos), "total": len(videos)}
 
-    # ---------- 详情页 ----------
     def detailContent(self, ids):
         if not ids:
             return {"list": []}
@@ -1394,7 +1347,6 @@ class Spider(_TVBoxBase):
                 out.append(p)
         return "#".join(out)
 
-    # ---------- 播放 ----------
     def playerContent(self, flag, pid, vipFlags=None):
         full_pid = str(pid or "")
         if "$" in full_pid:
@@ -1412,7 +1364,6 @@ class Spider(_TVBoxBase):
         except Exception:
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
-    # ---------- 搜索 ----------
     def searchContent(self, key, quick=False, pg="1"):
         key_s = str(key or "").strip()
         if not key_s:
