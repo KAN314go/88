@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
-# TVBox 聚合直播：玉山 + 安博 + 全球
-# 修复：HTTP 懒加载（解决聚合环境 import requests 失败）
-#       玉山播放用 live#N 保留 header
-#       全局台标兜底
+# 三源聚合：玉山 + 安博 + 全球
+# 使用: 把三个 py 独立时能跑的版本合并，只改类名
 
 import os
 import re
@@ -18,6 +16,24 @@ import urllib.request
 import ssl
 
 try:
+    import requests
+    HAS_REQ = True
+except ImportError:
+    HAS_REQ = False
+
+try:
+    from curl_cffi import requests as _cffi
+    HAS_CFFI = True
+except ImportError:
+    HAS_CFFI = False
+
+try:
+    from Crypto.Cipher import AES
+    HAS_AES = True
+except ImportError:
+    HAS_AES = False
+
+try:
     import urllib3
     urllib3.disable_warnings()
 except Exception:
@@ -31,169 +47,41 @@ except ImportError:
             pass
 
 
-SEP = ":"
+SEP = "@@"
 UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/131.0.0.0 Safari/537.36")
-LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
 
 
-def _log(msg):
-    print("[聚合] %s" % msg, flush=True)
-
-
-# ============================================================
-# HTTP 懒加载层 —— 解决聚合环境 import 失败
-# ============================================================
-_HTTP_KIND = None
-_HTTP_SESSION = None
-
-
-def _get_http():
-    global _HTTP_KIND, _HTTP_SESSION
-    if _HTTP_KIND is not None:
-        return _HTTP_KIND, _HTTP_SESSION
-
-    try:
-        import requests as _r
-        s = _r.Session()
-        try:
-            s.verify = False
-        except Exception:
-            pass
-        _HTTP_KIND, _HTTP_SESSION = "requests", s
-        _log("HTTP 层: requests")
-        return _HTTP_KIND, _HTTP_SESSION
-    except Exception as e:
-        _log("requests 导入失败: %s" % str(e)[:80])
-
-    try:
-        from curl_cffi import requests as _cf
-        s = _cf.Session()
-        _HTTP_KIND, _HTTP_SESSION = "cffi", s
-        _log("HTTP 层: curl_cffi")
-        return _HTTP_KIND, _HTTP_SESSION
-    except Exception as e:
-        _log("curl_cffi 导入失败: %s" % str(e)[:80])
-
-    _HTTP_KIND, _HTTP_SESSION = "urllib", None
-    _log("HTTP 层: urllib（无第三方库）")
-    return _HTTP_KIND, _HTTP_SESSION
-
-
-def _http_get(url, timeout=15, headers=None, verify=False):
-    kind, sess = _get_http()
-    h = dict(headers or {})
-    if kind == "requests":
-        r = sess.get(url, timeout=timeout, verify=verify, headers=h)
-        return r.status_code, r.text
-    if kind == "cffi":
-        r = sess.get(url, timeout=timeout, verify=verify, headers=h)
-        return r.status_code, r.text
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        raw = resp.read()
-        if raw.startswith(b"\x1f\x8b"):
-            raw = gzip.decompress(raw)
-        return resp.status, raw.decode("utf-8", errors="ignore")
-
-
-def _http_post(url, data=None, json_body=None, timeout=15,
-               headers=None, verify=False):
-    kind, sess = _get_http()
-    h = dict(headers or {})
-    if kind == "requests":
-        r = sess.post(url, data=data, json=json_body,
-                      timeout=timeout, verify=verify, headers=h)
-        return r.status_code, r.text
-    if kind == "cffi":
-        r = sess.post(url, data=data, json=json_body,
-                      timeout=timeout, verify=verify, headers=h)
-        return r.status_code, r.text
-    body = data
-    if json_body is not None:
-        body = json.dumps(json_body).encode("utf-8")
-        h.setdefault("Content-Type", "application/json")
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, data=body, headers=h, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return resp.status, resp.read().decode("utf-8", errors="ignore")
-
-
-def _split_id(full_id):
+def _split(full_id):
     s = str(full_id or "")
-    if ":" in s:
-        p, r = s.split(":", 1)
-        return p, r
-    if "__" in s:
-        p, r = s.split("__", 1)
-        return p, r
+    if SEP in s:
+        return s.split(SEP, 1)
     return "", s
-
-
-# ============================================================
-# 台标兜底
-# ============================================================
-_LOGO_ALIAS = {
-    "CCTV5PLUS": "CCTV5+", "CCTV5+": "CCTV5+",
-    "凤凰中文": "凤凰卫视中文台", "凤凰资讯": "凤凰卫视资讯台",
-    "凤凰香港": "凤凰卫视香港台", "凤凰电影": "凤凰卫视电影台",
-    "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
-    "TVB": "翡翠台", "VIUTV": "ViuTV", "HOYTV": "HOY TV",
-    "民视": "民视新闻台", "中天": "中天新闻台", "东森": "东森新闻台",
-    "三立": "三立新闻台", "TVBS": "TVBS新闻台", "年代": "年代新闻",
-    "八大": "八大第一台", "非凡": "非凡新闻台", "纬来": "纬来综合台",
-    "龙华": "龙华偶像台", "大爱": "大爱一台",
-    "翡翠台": "翡翠台", "明珠台": "明珠台", "澳视澳门": "澳视澳门",
-}
-
-
-def _fallback_logo(name):
-    if not name:
-        return ""
-    n = str(name).strip()
-    clean = re.sub(
-        r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清)$',
-        '', n, flags=re.IGNORECASE)
-    norm = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', clean).upper()
-
-    m = re.search(r'CCTV(\d+)(\+|PLUS)?', norm)
-    if m:
-        return LOGO_CDN.format("CCTV" + m.group(1) + ("+" if m.group(2) else ""))
-
-    for k in sorted(_LOGO_ALIAS, key=len, reverse=True):
-        if k.upper() in norm:
-            return LOGO_CDN.format(urllib.parse.quote(_LOGO_ALIAS[k]))
-
-    if re.search(r'[\u4e00-\u9fff]', clean):
-        return LOGO_CDN.format(urllib.parse.quote(clean))
-    return ""
 
 
 # ============================================================
 # 源 1：玉山
 # ============================================================
-class YushanSource(object):
+class YushanSource(_TVBoxBase):
     PREFIX = "ys"
     NAME = "玉山"
-    PLAY_FROM = "玉山直播"
-    DEFAULT_M3U_URL = "https://www.liaobagua.com/tv/tv.php?a=play"
-    BASE_REFERER = "https://www.liaobagua.com/"
+    M3U_URL = "https://www.liaobagua.com/tv/tv.php?a=play"
 
     FETCH_HEADERS = {
-        "User-Agent": UA_BROWSER, "Accept": "*/*",
+        "User-Agent": UA_BROWSER,
+        "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": BASE_REFERER,
+        "Referer": "https://www.liaobagua.com/",
     }
-    RESTRICTED_NAMES = ["乐活频道", "HiPLAY", "彩虹R频道", "潘朵拉玩美",
-                        "潘朵拉粉红", "K频道", "彩虹MOIVE", "彩虹e台",
-                        "星颖", "HAPPY"]
+
+    RESTRICTED_NAMES = [
+        "乐活频道", "HiPLAY", "彩虹R频道", "潘朵拉玩美", "潘朵拉粉红",
+        "K频道", "彩虹MOIVE", "彩虹e台", "星颖", "HAPPY",
+    ]
+
     EXACT_MAP = {"凤凰卫视中文台": "大陆"}
+
     KEYWORD_RULES = {
         "体育": ["CCTV-5", "CCTV5", "风云足球", "高尔夫网球", "央视台球",
                  "广东体育", "五星体育", "快乐垂钓", "Now Sports", "NowSports",
@@ -238,29 +126,26 @@ class YushanSource(object):
                  "广东", "广州", "深圳", "TVS", "大湾区", "岭南", "江门",
                  "嘉佳", "金鹰", "卡酷"],
     }
-    CATEGORY_ORDER = ["大陆", "香港", "台湾", "日本", "国际",
+
+    CATEGORY_ORDER = ["大陆", "日本", "香港", "台湾", "国际",
                       "新闻", "体育", "影视", "限制"]
 
-    def __init__(self):
-        self.m3u_url = self.DEFAULT_M3U_URL
-        self._channels = None
-        self._flat = None
-
     def init(self, extend=""):
-        if not extend:
-            return
-        try:
-            cfg = json.loads(extend) if isinstance(extend, str) else extend
-            if isinstance(cfg, dict) and cfg.get("m3u"):
-                self.m3u_url = str(cfg["m3u"])
-        except Exception:
-            pass
+        self._channels = None
+        self._flat = []
+        if extend:
+            try:
+                cfg = json.loads(extend) if isinstance(extend, str) else extend
+                if isinstance(cfg, dict) and cfg.get("m3u"):
+                    self.M3U_URL = str(cfg["m3u"])
+            except Exception:
+                pass
 
     @staticmethod
-    def _clean(name):
+    def _clean_name(name):
         return re.sub(r'\s*\[[^\]]*\]\s*$', '', str(name or '')).strip()
 
-    def _detect_cat(self, name):
+    def _detect_category(self, name):
         if not name:
             return "国际"
         if name in self.EXACT_MAP:
@@ -272,20 +157,41 @@ class YushanSource(object):
                     return cat
         return "国际"
 
-    def _fetch(self):
+    def _fetch_m3u(self):
+        h = dict(self.FETCH_HEADERS)
+        if HAS_CFFI:
+            try:
+                r = _cffi.get(self.M3U_URL, headers=h, impersonate="chrome131",
+                              verify=False, timeout=15, allow_redirects=True)
+                if r.status_code == 200 and r.text:
+                    return r.text
+            except Exception:
+                pass
+        if HAS_REQ:
+            try:
+                r = requests.get(self.M3U_URL, headers=h, verify=False,
+                                 timeout=15, allow_redirects=True)
+                if r.status_code == 200 and r.text:
+                    return r.text
+            except Exception:
+                pass
         try:
-            st, txt = _http_get(self.m3u_url,
-                                timeout=15, headers=self.FETCH_HEADERS)
-            if st == 200 and txt:
-                _log("[玉山] 拉到 %d 字节" % len(txt))
-                return txt
-            _log("[玉山] HTTP %s" % st)
-        except Exception as e:
-            _log("[玉山] fetch err: %s: %s"
-                 % (type(e).__name__, str(e)[:60]))
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ctx))
+            rq = urllib.request.Request(self.M3U_URL, headers=h)
+            with opener.open(rq, timeout=15) as resp:
+                raw = resp.read()
+                if raw.startswith(b"\x1f\x8b"):
+                    raw = gzip.decompress(raw)
+                return raw.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
         return ""
 
-    def _parse(self, text):
+    def _parse_m3u(self, text):
         out = []
         cur = None
         for raw in text.splitlines():
@@ -324,30 +230,29 @@ class YushanSource(object):
                 cur = None
         return out
 
-    def _load(self):
+    def _load_channels(self):
         if self._channels is not None:
             return self._channels
-        text = self._fetch()
+        text = self._fetch_m3u()
         if not text:
             self._channels = []
             return self._channels
-        raw = self._parse(text)
-        _log("[玉山] 解析出 %d 个频道" % len(raw))
-
+        raw_list = self._parse_m3u(text)
         grouped = {}
         restricted = []
-        for item in raw:
-            display = self._clean(item["display"] or item["tvg"])
+        for item in raw_list:
+            display = self._clean_name(item["display"] or item["tvg"])
             if not display:
                 continue
-            rec = {"name": display, "url": item["url"], "logo": item["logo"],
-                   "ua": item["ua"], "referer": item["referer"]}
+            record = {"name": display, "url": item["url"],
+                      "logo": item["logo"], "ua": item["ua"],
+                      "referer": item["referer"]}
             if (item["tvg"] in self.RESTRICTED_NAMES
                     or display in self.RESTRICTED_NAMES):
-                restricted.append(rec)
+                restricted.append(record)
                 continue
-            cat = self._detect_cat(display or item["tvg"])
-            grouped.setdefault(cat, []).append(rec)
+            cat = self._detect_category(display)
+            grouped.setdefault(cat, []).append(record)
 
         ordered = []
         for cat in self.CATEGORY_ORDER:
@@ -360,14 +265,13 @@ class YushanSource(object):
         if restricted:
             ordered.append(("限制", restricted))
         self._channels = ordered
-        _log("[玉山] 分组完成: %d 组" % len(ordered))
         return ordered
 
-    def _flat(self):
-        if self._flat is not None:
+    def _flat_list(self):
+        if self._flat:
             return self._flat
         arr = []
-        for cat, lst in self._load():
+        for cat, lst in self._load_channels():
             for ch in lst:
                 ch2 = dict(ch)
                 ch2["cat"] = cat
@@ -377,20 +281,20 @@ class YushanSource(object):
 
     def categories(self):
         try:
-            return [cat for cat, lst in self._load() if lst]
+            return [cat for cat, lst in self._load_channels() if lst]
         except Exception:
             return []
 
     def categoryContent(self, tid, pg, filter, extend):
         tid = str(tid).strip()
         vids = []
-        for i, ch in enumerate(self._flat()):
+        for i, ch in enumerate(self._flat_list()):
             if tid != "all" and ch["cat"] != tid:
                 continue
             vids.append({
                 "vod_id": "live#%d" % i,
                 "vod_name": ch["name"],
-                "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
+                "vod_pic": ch["logo"],
                 "vod_remarks": ch["cat"],
             })
         return {"list": vids, "page": 1, "pagecount": 1,
@@ -405,22 +309,21 @@ class YushanSource(object):
                 idx = int(s.split("#", 1)[1])
             except Exception:
                 return {"list": []}
-            arr = self._flat()
+            arr = self._flat_list()
             if 0 <= idx < len(arr):
                 ch = arr[idx]
                 safe = str(ch["name"]).replace("$", " ").replace("#", " ")
                 return {"list": [{
                     "vod_id": s,
                     "vod_name": ch["name"],
-                    "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
+                    "vod_pic": ch["logo"],
                     "vod_remarks": ch["cat"],
-                    "vod_play_from": self.PLAY_FROM,
-                    # ★ 关键：pid 还是 live#N，不是裸 URL
+                    "vod_play_from": "玉山直播",
                     "vod_play_url": "%s$%s" % (safe, s),
                 }]}
         return {"list": []}
 
-    def playerContent(self, flag, pid, vipFlags):
+    def playerContent(self, flag, pid, vipFlags=None):
         s = str(pid or "")
         if "$" in s:
             s = s.split("$", 1)[1]
@@ -429,18 +332,15 @@ class YushanSource(object):
                 idx = int(s.split("#", 1)[1])
             except Exception:
                 return {"parse": 0, "jx": 0, "url": "", "header": {}}
-            arr = self._flat()
+            arr = self._flat_list()
             if 0 <= idx < len(arr):
                 ch = arr[idx]
                 headers = {"User-Agent": ch.get("ua") or UA_BROWSER}
-                headers["Referer"] = ch.get("referer") or self.BASE_REFERER
-                _log("[玉山] 播放 %s -> %s" % (ch["name"], ch["url"][:60]))
-                return {"parse": 0, "jx": 0,
-                        "url": ch["url"], "header": headers}
+                headers["Referer"] = (ch.get("referer")
+                                      or "https://www.liaobagua.com/")
+                return {"parse": 0, "jx": 0, "url": ch["url"], "header": headers}
         if s.startswith("http"):
-            return {"parse": 0, "jx": 0, "url": s,
-                    "header": {"User-Agent": UA_BROWSER,
-                               "Referer": self.BASE_REFERER}}
+            return {"parse": 0, "jx": 0, "url": s, "header": {}}
         return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
     def search(self, key):
@@ -448,418 +348,505 @@ class YushanSource(object):
         if not key:
             return []
         out = []
-        for i, ch in enumerate(self._flat()):
+        for i, ch in enumerate(self._flat_list()):
             if key in ch["name"].lower():
                 out.append({
                     "vod_id": "live#%d" % i,
                     "vod_name": ch["name"],
-                    "vod_pic": ch["logo"] or _fallback_logo(ch["name"]),
+                    "vod_pic": ch["logo"],
                     "vod_remarks": ch["cat"],
                 })
         return out
 
 
 # ============================================================
-# 源 2：安博
+# 源 2：安博（UBLive）
 # ============================================================
-class AnboSource(object):
+class AnboSource(_TVBoxBase):
     PREFIX = "ab"
     NAME = "安博"
-    PLAY_FROM = "UBLive"
 
-    def __init__(self):
-        self.api = "https://www.usplaytvonphone.com"
-        self.login_ep = "info.php"
-        self.ch_ep = "live.php"
-        self.uri_ep = "uri.php"
+    def init(self, extend=""):
+        self.api_base_url = "https://www.usplaytvonphone.com"
+        self.login_endpoint = "info.php"
+        self.channel_endpoint = "live.php"
+        self.uri_endpoint = "uri.php"
         self.aes_key = b"W@ms7+2HZ34<iZz>"
-        self.user = "12345678"
-        self.pwd = "12345678"
-        self.mac = "00:1a:3b:5c:7d:9e"
-        self.base_dir = self._guess_base_dir()
+        self.username = "12345678"
+        self.password = "12345678"
+        self.real_mac = "00:1a:3b:5c:7d:9e"
+        try:
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            self.base_dir = "/sdcard/tvbox/py"
         self.channels = []
         self.categories = []
         self.default_logo = "https://img.icons8.com/color/48/tv.png"
-        self._token = None
-        self._token_time = 0
+        self.session = requests.Session() if HAS_REQ else None
+        if self.session is not None:
+            try:
+                self.session.verify = False
+            except Exception:
+                pass
 
-    def _guess_base_dir(self):
-        cands = []
-        try:
-            if "__file__" in globals() and __file__ and \
-                    not str(__file__).startswith("<"):
-                cands.append(os.path.dirname(os.path.abspath(__file__)))
-        except Exception:
-            pass
-        try:
-            if sys.path and sys.path[0] and os.path.isdir(sys.path[0]):
-                cands.append(sys.path[0])
-        except Exception:
-            pass
-        try:
-            cands.append(os.getcwd())
-        except Exception:
-            pass
-        cands.extend(["/sdcard/tvbox/py/", "/sdcard/tvbox/",
-                      "/sdcard/Download/", "/sdcard/"])
-        return cands[0] if cands else "/sdcard/tvbox/py"
-
-    def init(self, extend=""):
-        pass
-
+    # 加密工具
     @staticmethod
-    def _rand(n):
-        c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        return "".join(random.choice(c) for _ in range(n))
+    def _get_random_string(length):
+        chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        return "".join(random.choice(chars) for _ in range(length))
 
     @staticmethod
     def _get_index(c):
         if '0' <= c <= '9':
             return 10 + int(c)
-        if 'a' <= c <= 'z':
+        elif 'a' <= c <= 'z':
             return 10 + ord(c) - ord('a')
-        if 'A' <= c <= 'Z':
+        elif 'A' <= c <= 'Z':
             return 36 + ord(c) - ord('A')
         return 10
 
-    def _sub_enc(self, i, s, iv):
+    def _sub_encrypt(self, iv_idx, s, iv):
         try:
-            v = int(iv[i])
+            i2 = int(iv[iv_idx])
         except (ValueError, TypeError):
-            v = 0
-        if v == 0:
-            v = 10
-        return s[:v] + self._rand(v) + s[v:]
+            i2 = 0
+        if i2 == 0:
+            i2 = 10
+        return s[:i2] + self._get_random_string(i2) + s[i2:]
 
-    def _sub_dec(self, i, s, iv):
+    def _sub_decrypt(self, iv_idx, s, iv):
         try:
-            v = int(iv[i])
+            i2 = int(iv[iv_idx])
         except (ValueError, TypeError):
-            v = 0
-        if v == 0:
-            v = 10
-        return s[:v] + s[v * 2:]
+            i2 = 0
+        if i2 == 0:
+            i2 = 10
+        return s[:i2] + s[i2 * 2:]
 
     @staticmethod
-    def _md5(t):
-        return hashlib.md5(t.encode("utf-8")).hexdigest()
+    def _md5_hex(text):
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-    def _serial_md5(self, u):
-        a = self._md5(u)
-        b = self._md5("Gooooogle")
-        c = self._md5(a + b + "201306@202106>")
-        return self._md5(c + "Ub")
+    def _get_serial_md5(self, username):
+        inner1 = self._md5_hex(username)
+        inner2 = self._md5_hex("Gooooogle")
+        step3 = inner1 + inner2 + "201306@202106>"
+        step4 = self._md5_hex(step3)
+        step5 = step4 + "Ub"
+        return self._md5_hex(step5)
 
-    def _aes(self):
-        try:
-            from Crypto.Cipher import AES
-            return AES
-        except ImportError:
-            return None
-
-    def _enc(self, payload):
-        AES = self._aes()
-        if AES is None:
+    def _ubed_encrypt(self, payload_dict):
+        if not HAS_AES:
             return {"sign": "", "iv": ""}
-        s = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
-        iv = self._rand(16)
-        pad = 16 - (len(s.encode("utf-8")) % 16)
-        s2 = s + chr(pad) * pad
-        c = AES.new(self.aes_key, AES.MODE_CBC, iv.encode("utf-8"))
-        sign = base64.b64encode(c.encrypt(s2.encode("utf-8"))).decode("utf-8")
-        sign = self._sub_enc(5, sign, iv)
-        sign = self._sub_enc(12, sign, iv)
-        rnd = self._rand(self._get_index(sign[-6]))
-        return {"sign": rnd + sign, "iv": iv}
+        payload_str = json.dumps(payload_dict, separators=(',', ':'),
+                                 ensure_ascii=False)
+        iv = self._get_random_string(16)
+        block_size = 16
+        pad_len = block_size - (len(payload_str.encode('utf-8')) % block_size)
+        padded_str = payload_str + chr(pad_len) * pad_len
+        cipher = AES.new(self.aes_key, AES.MODE_CBC, iv.encode('utf-8'))
+        enc_bytes = cipher.encrypt(padded_str.encode('utf-8'))
+        sign = base64.b64encode(enc_bytes).decode('utf-8')
+        sign = self._sub_encrypt(5, sign, iv)
+        sign = self._sub_encrypt(12, sign, iv)
+        rnd_prefix = self._get_random_string(self._get_index(sign[-6]))
+        return {"sign": rnd_prefix + sign, "iv": iv}
 
-    def _dec(self, sign, iv):
-        AES = self._aes()
-        if not sign or not iv or AES is None:
+    def _ubed_decrypt(self, sign, iv):
+        if not sign or not iv or not HAS_AES:
             return ""
         try:
             idx = self._get_index(sign[-6])
             sign = sign[idx:]
-            sign = self._sub_dec(12, sign, iv)
-            sign = self._sub_dec(5, sign, iv)
-            p = 4 - len(sign) % 4
-            if p < 4:
-                sign += "=" * p
-            data = AES.new(self.aes_key, AES.MODE_CBC,
-                           iv.encode("utf-8")).decrypt(base64.b64decode(sign))
-            if not data:
+            sign = self._sub_decrypt(12, sign, iv)
+            sign = self._sub_decrypt(5, sign, iv)
+            pad = 4 - len(sign) % 4
+            if pad < 4:
+                sign += "=" * pad
+            enc_bytes = base64.b64decode(sign)
+            cipher = AES.new(self.aes_key, AES.MODE_CBC, iv.encode('utf-8'))
+            dec_bytes = cipher.decrypt(enc_bytes)
+            if not dec_bytes:
                 return ""
-            pl = data[-1]
-            if pl <= 0 or pl > len(data) or pl > 16:
-                pl = 0
-            if pl:
-                data = data[:-pl]
-            return data.decode("utf-8", errors="ignore")
+            pad_len = dec_bytes[-1]
+            if pad_len <= 0 or pad_len > len(dec_bytes) or pad_len > 16:
+                pad_len = 0
+            if pad_len:
+                dec_bytes = dec_bytes[:-pad_len]
+            return dec_bytes.decode('utf-8', errors='ignore')
         except Exception:
             return ""
 
-    def _headers(self, dev):
-        return {
-            "device_info": json.dumps(self._enc(dev), separators=(',', ':')),
+    def _fetch_dynamic_token(self):
+        if self.session is None:
+            return None
+        body_payload = {
+            "icode": "", "icode_name": self.username,
+            "icode_passwd": self.password,
+            "icode_sign": self._get_serial_md5(self.username), "signup": 0
+        }
+        current_time = int(time.time())
+        device_info = {
+            "app_laguage": 2, "brand": "Unblock", "cpu_api": "arm64-v8a",
+            "cpu_api2": "", "device_flag": "", "mac": self.real_mac,
+            "model": "UBOX10", "time": current_time,
+            "token": "a1391713a32e61d249b319def67ed961", "ubcode": "88888888"
+        }
+        headers = {
+            "device_info": json.dumps(self._ubed_encrypt(device_info),
+                                      separators=(',', ':')),
             "Content-Type": "application/json; charset=utf-8",
             "User-Agent": "okhttp/3.12.0",
-            "Connection": "close",
+            "Connection": "close"
         }
-
-    def _dev(self, token, ts):
-        return {"app_laguage": 2, "brand": "Unblock", "cpu_api": "arm64-v8a",
-                "cpu_api2": "", "device_flag": "", "mac": self.mac,
-                "model": "UBOX10", "time": ts, "token": token,
-                "ubcode": "88888888"}
-
-    def _fetch_token(self):
-        body = {"icode": "", "icode_name": self.user,
-                "icode_passwd": self.pwd,
-                "icode_sign": self._serial_md5(self.user), "signup": 0}
-        ts = int(time.time())
-        h = self._headers(self._dev("a1391713a32e61d249b319def67ed961", ts))
         try:
-            st, txt = _http_post(f"{self.api}/{self.login_ep}",
-                                 json_body=self._enc(body),
-                                 headers=h, timeout=8)
-            if st == 200 and txt:
-                j = json.loads(txt)
-                d = json.loads(self._dec(j.get("sign"), j.get("iv")))
-                if str(d.get("return_code")) == "99":
-                    _log("[安博] token 成功")
-                    return d.get("return_token")
-                _log("[安博] token rc=%s" % d.get("return_code"))
-        except Exception as e:
-            _log("[安博] token err: %s: %s"
-                 % (type(e).__name__, str(e)[:80]))
+            resp = self.session.post(
+                f"{self.api_base_url}/{self.login_endpoint}",
+                json=self._ubed_encrypt(body_payload),
+                headers=headers, timeout=6, verify=False)
+            if resp.status_code == 200 and resp.text:
+                res_json = resp.json()
+                dec_text = self._ubed_decrypt(res_json.get('sign'),
+                                              res_json.get('iv'))
+                res_data = json.loads(dec_text)
+                if str(res_data.get('return_code')) == "99":
+                    return res_data.get('return_token')
+        except Exception:
+            pass
         return None
 
-    def _ensure_token(self):
-        if self._token and (time.time() - self._token_time) < 1800:
-            return self._token
-        self._token = self._fetch_token()
-        self._token_time = time.time()
-        if not self._token:
-            _log("[安博] ⚠ 拿不到 token")
-        return self._token
-
-    def _get_uri(self, token, cid):
-        ts = int(time.time())
-        live = {"icode_name": self.user, "icode_passwd": self.pwd,
-                "icode_sign": self._serial_md5(self.user), "token": token}
-        h = self._headers(self._dev(token, ts))
-        try:
-            _http_post(f"{self.api}/{self.ch_ep}",
-                       json_body=self._enc(live), headers=h, timeout=5)
-            uri_body = {"icode_name": self.user, "icode_passwd": self.pwd,
-                        "icode_sign": self._serial_md5(self.user),
-                        "token": token, "id": str(cid)}
-            for _ in range(2):
-                st, txt = _http_post(f"{self.api}/{self.uri_ep}",
-                                     json_body=self._enc(uri_body),
-                                     headers=h, timeout=8)
-                if st == 200 and txt:
-                    j = json.loads(txt)
-                    d = json.loads(self._dec(j.get("sign"), j.get("iv")))
-                    if str(d.get("return_code")) == "99":
-                        return {"uri": d.get("return_uri"),
-                                "fftoken": d.get("return_fftoken") or "",
-                                "playtoken": d.get("return_playtoken") or ""}
-                    _log("[安博] uri rc=%s" % d.get("return_code"))
-                time.sleep(0.2)
-        except Exception as e:
-            _log("[安博] uri err: %s: %s"
-                 % (type(e).__name__, str(e)[:80]))
-        return None
-
-    def _load_json(self, loc, fname):
-        if str(loc).startswith(("http://", "https://")):
-            url = loc.rstrip("/") + "/" + fname
-            try:
-                st, txt = _http_get(url, timeout=15,
-                                    headers={"User-Agent": "okhttp/3.12.0"})
-                _log("[安博] GET %s -> %s (%d 字节)"
-                     % (url, st, len(txt or "")))
-                if st == 200 and txt:
-                    return json.loads(txt)
-            except Exception as e:
-                _log("[安博] GET 失败 %s: %s: %s"
-                     % (url, type(e).__name__, str(e)[:80]))
+    def _get_channel_info(self, token, channel_id):
+        if self.session is None:
             return None
-        p = os.path.join(loc, fname)
+        current_time = int(time.time())
+        live_payload = {
+            "icode_name": self.username, "icode_passwd": self.password,
+            "icode_sign": self._get_serial_md5(self.username), "token": token
+        }
+        device_info = {
+            "app_laguage": 2, "brand": "Unblock", "cpu_api": "arm64-v8a",
+            "cpu_api2": "", "device_flag": "", "mac": self.real_mac,
+            "model": "UBOX10", "time": current_time, "token": token,
+            "ubcode": "88888888"
+        }
+        headers = {
+            "device_info": json.dumps(self._ubed_encrypt(device_info),
+                                      separators=(',', ':')),
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "okhttp/3.12.0",
+            "Connection": "close"
+        }
         try:
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
+            self.session.post(f"{self.api_base_url}/{self.channel_endpoint}",
+                              json=self._ubed_encrypt(live_payload),
+                              headers=headers, timeout=4, verify=False)
+            uri_payload = {
+                "icode_name": self.username, "icode_passwd": self.password,
+                "icode_sign": self._get_serial_md5(self.username),
+                "token": token, "id": str(channel_id)
+            }
+            for _ in range(2):
+                resp = self.session.post(
+                    f"{self.api_base_url}/{self.uri_endpoint}",
+                    json=self._ubed_encrypt(uri_payload),
+                    headers=headers, timeout=5, verify=False)
+                if resp.status_code == 200 and resp.text:
+                    res_json = resp.json()
+                    dec_text = self._ubed_decrypt(res_json.get('sign'),
+                                                  res_json.get('iv'))
+                    result = json.loads(dec_text)
+                    if str(result.get('return_code')) == "99":
+                        return {
+                            "uri": result.get('return_uri'),
+                            "fftoken": result.get('return_fftoken'),
+                            "playtoken": result.get('return_playtoken')
+                        }
+                time.sleep(0.2)
+        except Exception:
+            pass
+        return None
+
+    def _load_json_from_file(self, path):
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception:
-            return None
+            pass
         return None
 
-    @staticmethod
-    def _clean_name(n):
-        n = str(n).strip()
-        n = re.sub(r'(高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清)$',
-                   '', n, flags=re.IGNORECASE)
-        return n.replace(' ', '').strip()
+    def _load_json_from_url(self, url):
+        if self.session is None:
+            return None
+        try:
+            resp = self.session.get(url, timeout=8, verify=False,
+                                    headers={"User-Agent": "okhttp/3.12.0"})
+            if resp.status_code == 200 and resp.text:
+                return resp.json()
+        except Exception:
+            pass
+        return None
 
-    def _match_logo(self, n):
-        c = self._clean_name(n)
-        if not c:
+    def _clean_channel_name(self, name):
+        name = str(name).strip()
+        name = re.sub(
+            r'(高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清)$',
+            '', name, flags=re.IGNORECASE)
+        return name.replace(' ', '').strip()
+
+    def _match_channel_logo(self, ch_name):
+        clean = self._clean_channel_name(ch_name)
+        if not clean:
             return self.default_logo
-        return _fallback_logo(c) or self.default_logo
+        logo_alias = {
+            "凤凰中文": "凤凰卫视中文台",
+            "凤凰资讯": "凤凰卫视资讯台",
+            "凤凰香港": "凤凰卫视香港台",
+            "凤凰电影": "凤凰卫视电影台",
+            "无线新闻": "无线新闻台",
+            "无线财经": "无线财经资讯台",
+            "TVB": "无线新闻台",
+            "湖南金鹰": "金鹰卡通",
+        }
+        clean = logo_alias.get(clean, clean)
+        return "https://epg.112114.eu.org/logo/%s.png" % urllib.parse.quote(clean)
 
-    def _load(self):
+    def load_channels(self):
         if self.channels:
             return self.channels
 
-        _log("[安博] base_dir: %s" % self.base_dir)
-        arr = []
-        cats_order = []
+        processed_channels = []
+        categories_order = []
 
-        # 多镜像 + 本地
-        cands = [
-            "https://cdn.jsdelivr.net/gh/kan1314go/9988@main/py",
-            "https://raw.gitmirror.com/kan1314go/9988/main/py",
-            "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py",
-            self.base_dir.rstrip("/") + "/",
+        possible_dirs = [
+            "https://raw.githubusercontent.com/kan1314go/9988/refs/heads/main/py/",
+            self.base_dir,
             "/sdcard/tvbox/py/",
             "/sdcard/Download/",
         ]
 
-        for d in cands:
-            hit = False
-            for fn in ("channels.json", "extra.json"):
-                data = self._load_json(d, fn)
+        for d in possible_dirs:
+            for fname in ['channels.json', 'extra.json']:
+                if str(d).startswith(('http://', 'https://')):
+                    url = d.rstrip('/') + '/' + fname
+                    data = self._load_json_from_url(url)
+                else:
+                    path = os.path.join(d, fname)
+                    data = self._load_json_from_file(path)
                 if not data:
                     continue
-                hit = True
-                _log("[安博] ✓ 命中 %s%s" % (d, fn))
-                for cat in data.get("return_live", []):
-                    g = str(cat.get("name", "未分類")).strip()
-                    if g not in cats_order:
-                        cats_order.append(g)
-                    for ch in cat.get("channel", []):
-                        cid = str(ch.get("id", ""))
-                        ct = str(ch.get("title", "")).strip()
-                        if not cid or not ct:
+                cat_list = data.get('return_live', [])
+                for cat in cat_list:
+                    group_name = str(cat.get('name', '未分類')).strip()
+                    if group_name not in categories_order:
+                        categories_order.append(group_name)
+                    for ch in cat.get('channel', []):
+                        ch_id = str(ch.get('id', ''))
+                        ch_title = str(ch.get('title', '')).strip()
+                        if not ch_id or not ch_title:
                             continue
-                        cl = str(ch.get("logo", "")).strip() \
-                            or self._match_logo(ct)
-                        arr.append({"id": cid, "name": ct,
-                                    "category": g, "logo": cl})
-            if hit:
-                break
+                        ch_logo = str(ch.get('logo', '')).strip()
+                        if not ch_logo:
+                            ch_logo = self._match_channel_logo(ch_title)
+                        processed_channels.append({
+                            "id": ch_id,
+                            "name": ch_title,
+                            "category": group_name,
+                            "logo": ch_logo
+                        })
 
-        if not arr:
-            _log("[安博] ⚠ 一个 JSON 都没命中")
-            arr = [{"id": "1", "name": "安博源未加载",
-                    "category": "系统提示", "logo": self.default_logo}]
-            cats_order = ["系统提示"]
-        else:
-            _log("[安博] 共 %d 频道 / %d 分类"
-                 % (len(arr), len(cats_order)))
+        if not processed_channels:
+            categories_order.append("系統提示")
+            processed_channels.append({
+                "id": "1",
+                "name": "未偵測到 channels.json 檔案",
+                "category": "系統提示",
+                "logo": self.default_logo
+            })
 
-        self.channels = arr
-        self.categories = cats_order
-        return arr
+        self.channels = processed_channels
+        self.categories = categories_order
+        return self.channels
 
-    def categories(self):
-        self._load()
+    def categories_list(self):
+        self.load_channels()
         return list(self.categories)
 
     def categoryContent(self, tid, pg, filter, extend):
-        arr = self._load()
-        vids = []
-        for ch in arr:
+        channels = self.load_channels()
+        videos = []
+        for ch in channels:
             if tid != "all" and ch["category"] != tid:
                 continue
-            vids.append({
+            videos.append({
                 "vod_id": ch["id"],
                 "vod_name": ch["name"],
-                "vod_pic": ch["logo"] or self.default_logo,
-                "vod_remarks": ch["category"],
+                "vod_pic": ch["logo"] if ch["logo"] else self.default_logo,
+                "vod_remarks": "直播",
+                "vod_area": ch["category"],
+                "vod_content": "UBLive 直播頻道"
             })
-        return {"list": vids, "page": 1, "pagecount": 1,
-                "limit": len(vids), "total": len(vids)}
+        return {
+            "list": videos, "page": 1, "pagecount": 1,
+            "limit": len(videos), "total": len(videos)
+        }
 
-    def detailContent(self, ids):
-        if not ids:
+    def detailContent(self, array):
+        if not array:
             return {"list": []}
-        cid = str(ids[0])
-        arr = self._load()
-        name, cat, logo = "UBLive", "直播", self.default_logo
-        for ch in arr:
-            if ch["id"] == cid:
-                name, cat, logo = ch["name"], ch["category"], ch["logo"]
+        channel_id = array[0]
+        channels = self.load_channels()
+        ch_name = "UBLive直播"
+        category = "直播"
+        ch_logo = self.default_logo
+        for ch in channels:
+            if ch["id"] == channel_id:
+                ch_name = ch["name"]
+                category = ch["category"]
+                if ch["logo"]:
+                    ch_logo = ch["logo"]
                 break
 
-        token = self._ensure_token()
-        if not token:
-            return {"list": [{
-                "vod_id": cid, "vod_name": name, "vod_pic": logo,
-                "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
-                "vod_play_url": "播放$__ERROR__:登录失败",
-            }]}
-        _log("[安博] 请求 %s 播放地址..." % cid)
-        info = self._get_uri(token, cid)
-        if not info or not info.get("uri"):
-            return {"list": [{
-                "vod_id": cid, "vod_name": name, "vod_pic": logo,
-                "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
-                "vod_play_url": "播放$__ERROR__:拿不到地址",
-            }]}
-        safe = str(name).replace("$", " ").replace("#", " ")
-        return {"list": [{
-            "vod_id": cid, "vod_name": name, "vod_pic": logo,
-            "vod_remarks": cat, "vod_play_from": self.PLAY_FROM,
-            "vod_play_url": "%s$%s|%s|%s" % (safe, info["uri"],
-                                              info.get("fftoken", ""),
-                                              info.get("playtoken", "")),
-        }]}
+        token = self._fetch_dynamic_token()
+        stream_url = ""
+        fftoken = ""
+        playtoken = ""
+        if token:
+            info = self._get_channel_info(token, channel_id)
+            if info and info.get("uri"):
+                stream_url = info.get("uri")
+                fftoken = info.get("fftoken", "")
+                playtoken = info.get("playtoken", "")
 
-    def playerContent(self, flag, pid, vipFlags):
-        s = str(pid or "")
-        if "$" in s:
-            s = s.split("$", 1)[1]
-        if s.startswith("__ERROR__:"):
-            _log("[安博] 播放失败: %s" % s[10:])
-            return {"parse": 0, "jx": 0, "url": "", "header": {}}
-        parts = s.split("|")
-        url = parts[0] if parts else ""
+        return {
+            "list": [{
+                "vod_id": channel_id,
+                "vod_name": ch_name,
+                "vod_pic": ch_logo,
+                "vod_remarks": "直播",
+                "vod_year": "",
+                "vod_area": category,
+                "vod_content": "UBLive 實時直播源",
+                "vod_play_from": "UBLive",
+                "vod_play_url": ("播放$%s|%s|%s" % (stream_url, fftoken, playtoken))
+                                if stream_url else "播放$error"
+            }]
+        }
+
+    def playerContent(self, flag, pid, vipFlags=None):
+        if not pid or pid == "error":
+            return {"parse": 0, "playUrl": "", "url": "", "header": {}}
+        parts = pid.split('|')
+        real_url = parts[0]
+        fftoken = parts[1] if len(parts) > 1 else ""
+        playtoken = parts[2] if len(parts) > 2 else ""
         headers = {"User-Agent": "okhttp/3.12.0"}
-        if len(parts) >= 3:
-            headers["fftoken"] = parts[-2]
-            headers["playtoken"] = parts[-1]
-            url = "|".join(parts[:-2])
-        _log("[安博] 播放 url=%s" % url[:80])
-        return {"parse": 0, "jx": 0, "url": url, "header": headers}
+        if fftoken:
+            headers["fftoken"] = fftoken
+        if playtoken:
+            headers["playtoken"] = playtoken
+        return {"parse": 0, "playUrl": "", "url": real_url, "header": headers}
 
     def search(self, key):
         key = str(key or "").lower().strip()
         if not key:
             return []
         out = []
-        for ch in self._load():
+        for ch in self.load_channels():
             if key in ch["name"].lower():
-                out.append({"vod_id": ch["id"], "vod_name": ch["name"],
-                            "vod_pic": ch["logo"] or self.default_logo,
-                            "vod_remarks": ch["category"]})
+                out.append({
+                    "vod_id": ch["id"],
+                    "vod_name": ch["name"],
+                    "vod_pic": ch["logo"] or self.default_logo,
+                    "vod_remarks": ch["category"],
+                })
         return out
 
 
 # ============================================================
-# 源 3：全球
+# 源 3：全球（DreamTV）
 # ============================================================
-class QuanqiuSource(object):
+class QuanqiuSource(_TVBoxBase):
     PREFIX = "qq"
     NAME = "全球"
-    PLAY_FROM = "DreamTV"
 
-    def __init__(self):
-        self.devid = '00:ea:20:21:53:5900:00:00:00:00:00'
+    _KEYWORD_LOGOS = {
+        "CCTV5PLUS": "CCTV5+", "CCTV5+": "CCTV5+",
+        "CCTV5体育": "CCTV5", "CCTV5": "CCTV5",
+        "CCTV1综合": "CCTV1", "CCTV1": "CCTV1",
+        "CCTV2财经": "CCTV2", "CCTV2": "CCTV2",
+        "CCTV3综艺": "CCTV3", "CCTV3": "CCTV3",
+        "CCTV4中文国际": "CCTV4", "CCTV4": "CCTV4",
+        "CCTV6电影": "CCTV6", "CCTV6": "CCTV6",
+        "CCTV7军事": "CCTV7", "CCTV7": "CCTV7",
+        "CCTV8电视剧": "CCTV8", "CCTV8": "CCTV8",
+        "CCTV9纪录": "CCTV9", "CCTV9": "CCTV9",
+        "CCTV10科教": "CCTV10", "CCTV10": "CCTV10",
+        "CCTV11戏曲": "CCTV11", "CCTV11": "CCTV11",
+        "CCTV12社会与法": "CCTV12", "CCTV12": "CCTV12",
+        "CCTV13新闻": "CCTV13", "CCTV13": "CCTV13",
+        "CCTV14少儿": "CCTV14", "CCTV14": "CCTV14",
+        "CCTV15音乐": "CCTV15", "CCTV15": "CCTV15",
+        "CCTV16奥林匹克": "CCTV16", "CCTV16": "CCTV16",
+        "CCTV17农业": "CCTV17", "CCTV17": "CCTV17",
+        "湖南卫视": "湖南卫视", "浙江卫视": "浙江卫视",
+        "江苏卫视": "江苏卫视", "东方卫视": "东方卫视",
+        "北京卫视": "北京卫视", "安徽卫视": "安徽卫视",
+        "山东卫视": "山东卫视", "广东卫视": "广东卫视",
+        "深圳卫视": "深圳卫视", "天津卫视": "天津卫视",
+        "湖北卫视": "湖北卫视", "四川卫视": "四川卫视",
+        "重庆卫视": "重庆卫视", "辽宁卫视": "辽宁卫视",
+        "黑龙江卫视": "黑龙江卫视", "吉林卫视": "吉林卫视",
+        "河南卫视": "河南卫视", "河北卫视": "河北卫视",
+        "山西卫视": "山西卫视", "陕西卫视": "陕西卫视",
+        "甘肃卫视": "甘肃卫视", "宁夏卫视": "宁夏卫视",
+        "青海卫视": "青海卫视", "新疆卫视": "新疆卫视",
+        "西藏卫视": "西藏卫视", "云南卫视": "云南卫视",
+        "贵州卫视": "贵州卫视", "广西卫视": "广西卫视",
+        "海南卫视": "海南卫视", "东南卫视": "东南卫视",
+        "江西卫视": "江西卫视", "内蒙古卫视": "内蒙古卫视",
+        "厦门卫视": "厦门卫视", "延边卫视": "延边卫视",
+        "兵团卫视": "兵团卫视",
+        "翡翠台": "翡翠台", "明珠台": "明珠台",
+        "无线新闻": "无线新闻台", "无线财经": "无线财经资讯台",
+        "TVB": "翡翠台", "J2": "J2",
+        "VIUTV": "ViuTV", "HOYTV": "HOY TV",
+        "凤凰卫视中文台": "凤凰卫视中文台",
+        "凤凰卫视资讯台": "凤凰卫视资讯台",
+        "凤凰卫视香港台": "凤凰卫视香港台",
+        "凤凰卫视电影台": "凤凰卫视电影台",
+        "凤凰中文": "凤凰卫视中文台",
+        "凤凰资讯": "凤凰卫视资讯台",
+        "凤凰香港": "凤凰卫视香港台",
+        "凤凰电影": "凤凰卫视电影台",
+        "澳视澳门": "澳视澳门", "澳门莲花": "澳门莲花卫视",
+        "民视": "民视新闻台", "中视": "中视", "华视": "华视",
+        "台视": "台视", "公视": "公视", "大爱": "大爱一台",
+        "中天": "中天新闻台", "东森": "东森新闻台",
+        "三立": "三立新闻台", "TVBS": "TVBS新闻台",
+        "年代": "年代新闻", "八大": "八大第一台",
+        "非凡": "非凡新闻台", "纬来": "纬来综合台",
+        "龙华": "龙华偶像台",
+        "上海新闻综合": "上海新闻综合", "上海东方卫视": "东方卫视",
+        "湖南经视": "湖南经视", "江苏城市": "江苏城市",
+        "北京新闻": "北京新闻", "广东珠江": "广东珠江",
+        "南方卫视": "南方卫视", "深圳都市": "深圳都市频道",
+    }
+
+    def init(self, extend=""):
+        self.device_ids = [
+            '00:fa:20:22:02:8cf4:09:d8:88:51:7a',
+            '00:fa:20:22:05:07d0:22:be:7f:28:f5',
+            '00:fa:20:22:1f:09f0:25:b7:76:b1:1a',
+            '00:ea:20:21:4b:96d0:22:be:c1:c7:bb',
+            '00:ea:20:21:53:5900:00:00:00:00:00',
+        ]
+        self.devid = self.device_ids[4]
         self.hardware = "Dream TV-Amlogic-8.1.73GB-11.50 GB-nw"
         self.version = "DreamTV 20220516"
         self.salt = "MZkF@270mp#cOKD0%8Y8dV&5AmH&BTzq"
         self.from_id = "2011"
+
         self.api_urls = [
             "https://b51d520253d0cfed.boxtv.win/api/wbtj5hmx",
             "http://api.2011.boxtv.win/api/wbtj5hmx",
@@ -873,207 +860,263 @@ class QuanqiuSource(object):
         self.channels_cache = []
         self.cache_time = 0
         self.auth_time = 0
+        self.LOGO_CDN = "https://epg.112114.eu.org/logo/{}.png"
+        self._sorted_keys = sorted(
+            self._KEYWORD_LOGOS.keys(), key=len, reverse=True)
+        self.DEBUG_LOG = False
+        self.session = requests.Session() if HAS_REQ else None
+        if self.session is not None:
+            try:
+                self.session.verify = False
+            except Exception:
+                pass
 
-    def init(self, extend=""):
-        pass
-
-    def _sign(self, ts, m):
-        return hashlib.md5((self.from_id + self.salt + str(ts) + m
-                            + self.devid).encode("utf-8")).hexdigest()
+    def _sign(self, ts, method):
+        raw = self.from_id + self.salt + str(ts) + method + self.devid
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     def _headers(self, body):
-        return {"Content-Type": "application/json; charset=utf-8",
-                "Connection": "Keep-Alive",
-                "User-Agent": "okhttp/3.12.5",
-                "Accept-Encoding": "identity"}
+        b = body.encode("utf-8")
+        return {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(b)),
+            "Connection": "Keep-Alive",
+            "User-Agent": "okhttp/3.12.5",
+            "Accept-Encoding": "identity"
+        }
 
     def _post(self, payload):
+        if self.session is None:
+            raise Exception("no requests")
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        last_err = "Dream API failed"
-        for url in list(self.api_urls):
+        last_error = "Dream API request failed"
+        for api_url in self.api_urls:
             try:
-                st, txt = _http_post(url, data=body.encode("utf-8"),
-                                     headers=self._headers(body),
-                                     timeout=15)
-                if st != 200:
-                    last_err = "HTTP %s" % st
+                r = self.session.post(
+                    api_url, data=body.encode("utf-8"),
+                    headers=self._headers(body), timeout=15, verify=False)
+                if r.status_code != 200:
+                    last_error = "HTTP %s" % r.status_code
                     continue
-                j = json.loads(txt)
-                if isinstance(j, dict) and j.get("data") is not None:
-                    try:
-                        self.api_urls.remove(url)
-                        self.api_urls.insert(0, url)
-                    except Exception:
-                        pass
-                    return j["data"]
-                last_err = "no data"
+                result = r.json()
+                if isinstance(result, dict):
+                    if result.get("data") is not None:
+                        return result.get("data")
+                    last_error = "API 沒有 data"
+                else:
+                    last_error = "API 回應格式錯誤"
             except Exception as e:
-                last_err = "%s: %s" % (type(e).__name__, str(e)[:80])
-        raise Exception(last_err)
+                last_error = str(e)
+        raise Exception(last_error)
 
-    def _login1(self):
+    def _login_step_1(self):
         ts = int(time.time())
-        m = "1-1-2"
-        p = {"method": m,
-             "params": {"device_id": self.devid, "hardware": self.hardware,
-                        "sn": self.devid, "version": self.version},
-             "system": {"from": self.from_id, "sign": self._sign(ts, m),
-                        "time": ts, "version": "V1"}}
-        d = self._post(p)
-        if not isinstance(d, dict):
-            raise Exception("1-1-2 bad data")
-        c = d.get("client") or {}
-        s = d.get("server") or {}
-        tk = c.get("token")
-        if not tk:
-            raise Exception("IP 或 devid 被封")
-        self.token = str(tk)
-        self.client_id = str(c.get("client_id") or "")
-        self.password = str(c.get("password") or "")
-        self.server_time = int(c.get("time") or ts)
-        hosts = s.get("hosts") or []
+        method = "1-1-2"
+        payload = {
+            "method": method,
+            "params": {
+                "device_id": self.devid, "hardware": self.hardware,
+                "sn": self.devid, "version": self.version
+            },
+            "system": {
+                "from": self.from_id, "sign": self._sign(ts, method),
+                "time": ts, "version": "V1"
+            }
+        }
+        data = self._post(payload)
+        if not isinstance(data, dict):
+            raise Exception("1-1-2 data 格式錯誤")
+        client = data.get("client") or {}
+        server = data.get("server") or {}
+        token = client.get("token")
+        if not token:
+            raise Exception("你的 IP 或 devid 被 Dream 封鎖")
+        self.token = str(token)
+        self.client_id = str(client.get("client_id") or "")
+        self.password = str(client.get("password") or "")
+        self.server_time = int(client.get("time") or ts)
+        hosts = server.get("hosts") or []
         if hosts:
-            f = hosts[0]
-            self.server = (str(f.get("url") or "") if isinstance(f, dict)
-                           else str(f))
+            first = hosts[0]
+            self.server = str(first.get("url") or "") \
+                if isinstance(first, dict) else str(first)
         if not self.server:
-            raise Exception("no server")
+            raise Exception("Dream API 沒有 server")
 
-    def _login2(self):
-        m = "1-1-3"
+    def _login_step_2(self):
+        method = "1-1-3"
         ts = int(self.server_time or time.time())
-        p = {"method": m,
-             "params": {"client_id": self.client_id, "device_id": self.devid,
-                        "hardware": self.hardware, "password": self.password,
-                        "sn": self.devid, "token": self.token,
-                        "version": self.version},
-             "system": {"from": self.from_id, "sign": self._sign(ts, m),
-                        "time": ts, "version": "V1"}}
-        d = self._post(p)
-        if isinstance(d, dict):
-            c = d.get("client") or {}
-            if c.get("token"):
-                self.token = str(c["token"])
+        payload = {
+            "method": method,
+            "params": {
+                "client_id": self.client_id, "device_id": self.devid,
+                "hardware": self.hardware, "password": self.password,
+                "sn": self.devid, "token": self.token, "version": self.version
+            },
+            "system": {
+                "from": self.from_id, "sign": self._sign(ts, method),
+                "time": ts, "version": "V1"
+            }
+        }
+        data = self._post(payload)
+        if isinstance(data, dict):
+            client = data.get("client") or {}
+            if client.get("token"):
+                self.token = str(client.get("token"))
 
-    def _fetch_ch(self):
-        m = "1-1-4"
+    def _fetch_channel_data(self):
+        method = "1-1-4"
         ts = int(self.server_time or time.time())
-        p = {"method": m,
-             "params": {"client_id": self.client_id, "device_id": self.devid,
-                        "hardware": self.hardware, "password": self.password,
-                        "sn": self.devid, "token": self.token,
-                        "version": self.version},
-             "system": {"from": self.from_id, "sign": self._sign(ts, m),
-                        "time": ts, "version": "V1"}}
-        d = self._post(p)
-        if isinstance(d, list):
-            return d
-        if isinstance(d, dict):
-            for k in ("channels", "list", "items", "data"):
-                if isinstance(d.get(k), list):
-                    return d[k]
+        payload = {
+            "method": method,
+            "params": {
+                "client_id": self.client_id, "device_id": self.devid,
+                "hardware": self.hardware, "password": self.password,
+                "sn": self.devid, "token": self.token, "version": self.version
+            },
+            "system": {
+                "from": self.from_id, "sign": self._sign(ts, method),
+                "time": ts, "version": "V1"
+            }
+        }
+        data = self._post(payload)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("channels", "list", "items", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
         return []
 
     def _get_channels(self):
-        if self.channels_cache and (time.time() - self.cache_time) < 600:
+        if (self.channels_cache
+                and (time.time() - self.cache_time) < 600):
             return self.channels_cache
-        self._login1()
-        self._login2()
-        chs = self._fetch_ch()
-        self.channels_cache = chs
+        self._login_step_1()
+        self._login_step_2()
+        channels = self._fetch_channel_data()
+        self.channels_cache = channels
         self.cache_time = time.time()
         self.auth_time = time.time()
-        _log("[全球] 拿到 %d 频道" % len(chs))
-        return chs
+        return channels
 
     @staticmethod
-    def _n(it):
-        return str(it.get("name") or it.get("title")
-                   or it.get("channel_name") or "DreamTV") \
-            if isinstance(it, dict) else "DreamTV"
+    def _get_channel_name(item):
+        if not isinstance(item, dict):
+            return "DreamTV"
+        return str(item.get("name") or item.get("title")
+                   or item.get("channel_name") or "DreamTV")
 
     @staticmethod
-    def _c(it):
-        return str(it.get("category") or it.get("group")
-                   or it.get("group_name") or "DreamTV") \
-            if isinstance(it, dict) else "DreamTV"
+    def _get_channel_category(item):
+        if not isinstance(item, dict):
+            return "DreamTV"
+        return str(item.get("category") or item.get("group")
+                   or item.get("group_name") or "DreamTV")
 
     @staticmethod
-    def _u(it):
-        return str(it.get("url") or it.get("play_url")
-                   or it.get("stream_url") or "") \
-            if isinstance(it, dict) else ""
+    def _get_channel_url(item):
+        if not isinstance(item, dict):
+            return ""
+        return str(item.get("url") or item.get("play_url")
+                   or item.get("stream_url") or "")
 
-    def _logo(self, it):
-        raw = str(it.get("logo") or it.get("pic")
-                  or it.get("icon") or "").strip() \
-            if isinstance(it, dict) else ""
-        if raw and raw.lower() not in ("null", "none", "0"):
-            if raw.startswith("http"):
-                return raw
-            if self.server:
-                return self.server.rstrip("/") + "/" + raw.lstrip("/")
-            return raw
+    def _normalize(self, name):
+        if not name:
+            return ""
+        name = str(name).strip()
+        for _ in range(2):
+            name = re.sub(
+                r'(?:[-\s_·]*)(?:高清|超清|标清|蓝光|HD|FHD|UHD|4K|SD|1080P|8M|超高清|高码|HD1080)$',
+                '', name, flags=re.IGNORECASE)
+        name = re.sub(r'[\s\-_\.\(\)\[\]（）【】·]', '', name)
+        return name.upper()
+
+    def _match_keyword(self, ch_name):
+        norm = self._normalize(ch_name)
+        if not norm:
+            return ""
+        for key in self._sorted_keys:
+            if key in norm:
+                return self._KEYWORD_LOGOS[key]
         return ""
 
-    def _join(self, server, path):
-        if not server:
+    def _get_channel_logo(self, item):
+        if not isinstance(item, dict):
             return ""
+        name = self._get_channel_name(item)
+        raw_logo = str(item.get("logo") or item.get("pic")
+                       or item.get("icon") or "").strip()
+        if raw_logo and raw_logo.lower() not in ("null", "none", "0", ""):
+            if raw_logo.startswith("http"):
+                return raw_logo
+            if self.server:
+                if raw_logo.startswith("/"):
+                    return self.server.rstrip("/") + raw_logo
+                return self.server.rstrip("/") + "/" + raw_logo.lstrip("/")
+            return raw_logo
+        matched = self._match_keyword(name)
+        if matched:
+            return self.LOGO_CDN.format(urllib.parse.quote(matched))
+        norm_for_cdn = re.sub(
+            r'(?:[-\s]*(?:高清|超清|标清|HD|FHD|UHD|4K|1080P))$',
+            '', name, flags=re.IGNORECASE
+        ).replace(" ", "").strip()
+        if norm_for_cdn:
+            return self.LOGO_CDN.format(urllib.parse.quote(norm_for_cdn))
+        return ""
+
+    def _get_channel_play_url(self, item):
+        raw_url = self._get_channel_url(item)
+        if not raw_url:
+            return ""
+        if raw_url.startswith("http://") or raw_url.startswith("https://"):
+            return raw_url
+        return self._join_stream_url(self.server, raw_url)
+
+    def _join_stream_url(self, server, path):
+        if not server:
+            return path
         server = str(server).strip()
         path = str(path).strip()
-        if path.startswith(("http://", "https://")):
+        if path.startswith("http://") or path.startswith("https://"):
             return path
         if path.startswith("/"):
             return server.rstrip("/") + path
         return server.rstrip("/") + "/" + path.lstrip("/")
 
-    def _play_url(self, it):
-        raw = self._u(it)
-        if not raw:
-            return ""
-        if raw.startswith(("http://", "https://")):
-            return raw
-        return self._join(self.server, raw)
-
-    def _to_video(self, it):
-        if not self._u(it):
-            return None
-        u = self._play_url(it)
-        if not u:
-            return None
-        logo = self._logo(it) or _fallback_logo(self._n(it))
-        return {"vod_id": u, "vod_name": self._n(it),
-                "vod_pic": logo, "vod_remarks": self._c(it)}
-
     def categories(self):
         try:
-            self._get_channels()
-        except Exception as e:
-            _log("[全球] categories 失败: %s: %s"
-                 % (type(e).__name__, str(e)[:60]))
+            channels = self._get_channels()
+        except Exception:
             return []
-        seen = []
-        for it in self.channels_cache:
-            c = self._c(it)
-            if c and c not in seen:
-                seen.append(c)
-        return seen
+        cats = []
+        for item in channels:
+            c = self._get_channel_category(item)
+            if c and c not in cats:
+                cats.append(c)
+        return cats
 
     def categoryContent(self, tid, pg, filter, extend):
         try:
-            chs = self._get_channels()
-        except Exception as e:
-            _log("[全球] 加载失败: %s: %s"
-                 % (type(e).__name__, str(e)[:60]))
+            channels = self._get_channels()
+        except Exception:
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
         vids = []
-        for it in chs:
-            if tid != "all" and self._c(it) != tid:
+        for item in channels:
+            if tid != "all" and self._get_channel_category(item) != tid:
                 continue
-            v = self._to_video(it)
-            if v:
-                vids.append(v)
+            play_url = self._get_channel_play_url(item)
+            if not play_url:
+                continue
+            vids.append({
+                "vod_id": play_url,
+                "vod_name": self._get_channel_name(item),
+                "vod_pic": self._get_channel_logo(item),
+                "vod_remarks": self._get_channel_category(item),
+            })
         return {"list": vids, "page": 1, "pagecount": 1,
                 "limit": len(vids), "total": len(vids)}
 
@@ -1081,47 +1124,54 @@ class QuanqiuSource(object):
         if not ids:
             return {"list": []}
         pid = str(ids[0])
-        name, logo = "DreamTV", ""
+        name, logo = "DreamTV直播", ""
         try:
-            chs = self._get_channels()
+            channels = self._get_channels()
         except Exception:
-            chs = self.channels_cache
-        for it in chs:
-            if self._play_url(it) == pid:
-                name = self._n(it)
-                logo = self._logo(it) or _fallback_logo(name)
+            channels = self.channels_cache
+        for item in channels:
+            if self._get_channel_play_url(item) == pid:
+                name = self._get_channel_name(item)
+                logo = self._get_channel_logo(item)
                 break
         return {"list": [{
             "vod_id": pid, "vod_name": name, "vod_pic": logo,
-            "vod_remarks": "直播", "vod_play_from": self.PLAY_FROM,
-            "vod_play_url": "播放$%s" % pid,
+            "vod_remarks": "直播", "vod_content": "DreamTV直播頻道",
+            "vod_play_from": "DreamTV",
+            "vod_play_url": "播放$" + pid
         }]}
 
-    def playerContent(self, flag, pid, vipFlags):
-        s = str(pid or "")
-        if "$" in s:
-            s = s.split("$", 1)[1]
-        header = {"User-Agent": "Lavf/58.12.100", "Accept": "*/*",
-                  "Connection": "keep-alive", "Icy-MetaData": "1",
-                  "userid": str(self.client_id),
-                  "usertoken": str(self.token),
-                  "Cache-Control": "no-cache", "Pragma": "no-cache"}
-        return {"parse": 0, "playUrl": "", "url": s, "header": header}
+    def playerContent(self, flag, pid, vipFlags=None):
+        if not pid:
+            return {"parse": 0, "playUrl": "", "url": ""}
+        header = {
+            "User-Agent": "Lavf/58.12.100", "Accept": "*/*",
+            "Connection": "keep-alive", "Icy-MetaData": "1",
+            "userid": str(self.client_id), "usertoken": str(self.token),
+            "Cache-Control": "no-cache", "Pragma": "no-cache"
+        }
+        return {"parse": 0, "playUrl": "", "url": str(pid), "header": header}
 
     def search(self, key):
         key = str(key or "").lower().strip()
         if not key:
             return []
         try:
-            chs = self._get_channels()
+            channels = self._get_channels()
         except Exception:
             return []
         out = []
-        for it in chs:
-            if key in self._n(it).lower():
-                v = self._to_video(it)
-                if v:
-                    out.append(v)
+        for item in channels:
+            if key in self._get_channel_name(item).lower():
+                play_url = self._get_channel_play_url(item)
+                if not play_url:
+                    continue
+                out.append({
+                    "vod_id": play_url,
+                    "vod_name": self._get_channel_name(item),
+                    "vod_pic": self._get_channel_logo(item),
+                    "vod_remarks": self._get_channel_category(item),
+                })
         return out
 
 
@@ -1129,32 +1179,27 @@ class QuanqiuSource(object):
 # 主聚合 Spider
 # ============================================================
 class Spider(_TVBoxBase):
+
     def __init__(self):
         try:
             super().__init__()
         except Exception:
             pass
-        self._sources = {
+        self.sources = {
             YushanSource.PREFIX: YushanSource(),
             AnboSource.PREFIX: AnboSource(),
             QuanqiuSource.PREFIX: QuanqiuSource(),
         }
 
     def getName(self):
-        return "聚合直播"
+        return "三源聚合"
 
     def init(self, extend=""):
-        _get_http()
-        try:
-            from Crypto.Cipher import AES
-            _log("AES 库: 可用")
-        except ImportError:
-            _log("⚠ 无 pycryptodome，安博无法登录")
-        for s in self._sources.values():
+        for src in self.sources.values():
             try:
-                s.init(extend)
-            except Exception as e:
-                _log("init %s 失败: %s" % (s.NAME, e))
+                src.init(extend)
+            except Exception:
+                pass
 
     def isVideoFormat(self, url):
         return False
@@ -1162,148 +1207,130 @@ class Spider(_TVBoxBase):
     def manualVideoCheck(self):
         return False
 
-    # 首页平铺所有分类
-    def homeContent(self, filter=None):
+    # ---------- 首页：平铺所有源的所有分类 ----------
+    def homeContent(self, filter=False):
         classes = []
-        for prefix, src in self._sources.items():
+        for key, src in self.sources.items():
             try:
-                cats = src.categories()
-            except Exception as e:
-                _log("[%s] categories 失败: %s" % (src.NAME, e))
+                if hasattr(src, "categories") and callable(src.categories):
+                    cats = src.categories()
+                elif hasattr(src, "categories_list"):
+                    cats = src.categories_list()
+                else:
+                    cats = []
+            except Exception:
                 cats = []
+
             if not cats:
                 classes.append({
-                    "type_id": "%s%sall" % (prefix, SEP),
+                    "type_id": "%s%sall" % (key, SEP),
                     "type_name": "📺 %s (未加载)" % src.NAME,
                 })
                 continue
+
             classes.append({
-                "type_id": "%s%sall" % (prefix, SEP),
+                "type_id": "%s%sall" % (key, SEP),
                 "type_name": "📺 %s · 全部" % src.NAME,
             })
             for c in cats:
-                if not c or c in ("all", "系统提示", "系統提示"):
+                if not c or c in ("all", "系統提示", "系统提示"):
                     continue
                 classes.append({
-                    "type_id": "%s%s%s" % (prefix, SEP, c),
+                    "type_id": "%s%s%s" % (key, SEP, c),
                     "type_name": "📺 %s · %s" % (src.NAME, c),
                 })
-        _log("首页分类数: %d" % len(classes))
         return {"class": classes, "filters": {}, "list": []}
 
     def homeVideoContent(self):
         return {"list": []}
 
-    def categoryContent(self, tid, pg, filter, extend):
+    # ---------- 分类 ----------
+    def categoryContent(self, tid, pg, filter=False, extend=None):
         tid_s = str(tid).strip()
-        if SEP in tid_s:
-            prefix, cat = tid_s.split(SEP, 1)
-        elif "__" in tid_s:
-            prefix, cat = tid_s.split("__", 1)
-        else:
-            prefix, cat = tid_s, "all"
-        src = self._sources.get(prefix)
+        key, cat = _split(tid_s)
+        src = self.sources.get(key)
         if src is None:
-            _log("未知板块: %s" % tid_s)
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
         try:
-            res = src.categoryContent(cat, pg, filter, extend)
-        except Exception as e:
-            _log("[%s] categoryContent 失败: %s" % (src.NAME, e))
+            res = src.categoryContent(cat, pg, filter, extend or {})
+        except Exception:
             return {"list": [], "page": 1, "pagecount": 1,
                     "limit": 0, "total": 0}
+
         for v in res.get("list", []):
-            if not v.get("vod_pic"):
-                fb = _fallback_logo(v.get("vod_name", ""))
-                if fb:
-                    v["vod_pic"] = fb
             if v.get("vod_id"):
-                v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
+                v["vod_id"] = "%s%s%s" % (key, SEP, v["vod_id"])
         return res
 
+    # ---------- 详情 ----------
     def detailContent(self, ids):
         if not ids:
             return {"list": []}
         full_id = str(ids[0])
-        prefix, real_id = _split_id(full_id)
-        src = self._sources.get(prefix)
+        key, real_id = _split(full_id)
+        src = self.sources.get(key)
         if src is None:
-            return {"list": [{"vod_id": full_id, "vod_name": "未知源",
-                              "vod_content": "prefix=%s" % prefix}]}
+            return {"list": []}
+
         try:
             res = src.detailContent([real_id])
-        except Exception as e:
-            _log("[%s] detailContent 失败: %s" % (src.NAME, e))
-            return {"list": [{"vod_id": full_id, "vod_name": "详情失败",
-                              "vod_content": str(e)}]}
+        except Exception:
+            return {"list": []}
+
         for v in res.get("list", []):
             v["vod_id"] = full_id
             purl = v.get("vod_play_url", "")
             if purl:
-                v["vod_play_url"] = self._prefix_url(purl, prefix)
+                v["vod_play_url"] = self._prefix_play_url(purl, key)
             vf = v.get("vod_play_from") or "直播"
             if not vf.startswith("[%s]" % src.NAME):
                 v["vod_play_from"] = "[%s] %s" % (src.NAME, vf)
-            if not v.get("vod_pic"):
-                fb = _fallback_logo(v.get("vod_name", ""))
-                if fb:
-                    v["vod_pic"] = fb
         return res
 
     @staticmethod
-    def _prefix_url(purl, prefix):
+    def _prefix_play_url(purl, key):
         out = []
         for p in str(purl).split("#"):
             if "$" in p:
                 name, pid = p.split("$", 1)
-                out.append("%s$%s%s%s" % (name, prefix, SEP, pid))
+                out.append("%s$%s%s%s" % (name, key, SEP, pid))
             else:
                 out.append(p)
         return "#".join(out)
 
-    def playerContent(self, flag, pid, vipFlags):
+    # ---------- 播放 ----------
+    def playerContent(self, flag, pid, vipFlags=None):
         full_pid = str(pid or "")
         if "$" in full_pid:
             full_pid = full_pid.split("$", 1)[1]
-        if SEP in full_pid:
-            prefix, real_pid = full_pid.split(SEP, 1)
-        elif "__" in full_pid:
-            prefix, real_pid = full_pid.split("__", 1)
-        else:
-            prefix, real_pid = "", full_pid
-        src = self._sources.get(prefix)
+        key, real_pid = _split(full_pid)
+        src = self.sources.get(key)
         if src is None:
-            _log("未知源: %s (pid=%s)" % (prefix, full_pid[:80]))
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
         try:
             return src.playerContent(flag, real_pid, vipFlags)
-        except Exception as e:
-            _log("[%s] playerContent 失败: %s" % (src.NAME, e))
+        except Exception:
             return {"parse": 0, "jx": 0, "url": "", "header": {}}
 
-    def searchContent(self, key, quick, pg="1"):
-        key = str(key or "").strip()
-        if not key:
+    # ---------- 搜索 ----------
+    def searchContent(self, key, quick=False, pg="1"):
+        key_s = str(key or "").strip()
+        if not key_s:
             return {"list": []}
-        out = []
-        for prefix, src in self._sources.items():
+        all_videos = []
+        for prefix, src in self.sources.items():
             try:
-                arr = src.search(key)
-            except Exception as e:
-                _log("[%s] search 失败: %s" % (src.NAME, e))
-                continue
+                arr = src.search(key_s)
+            except Exception:
+                arr = []
             for v in arr:
-                if not v.get("vod_pic"):
-                    fb = _fallback_logo(v.get("vod_name", ""))
-                    if fb:
-                        v["vod_pic"] = fb
                 if v.get("vod_id"):
                     v["vod_id"] = "%s%s%s" % (prefix, SEP, v["vod_id"])
                 v["vod_remarks"] = "[%s] %s" % (src.NAME,
                                                 v.get("vod_remarks") or "直播")
-                out.append(v)
-        return {"list": out}
+                all_videos.append(v)
+        return {"list": all_videos}
 
     def searchContentPage(self, keywords, quick, page):
         return self.searchContent(keywords, quick, page)
@@ -1315,6 +1342,13 @@ class Spider(_TVBoxBase):
         return ""
 
     def destroy(self):
+        for src in self.sources.values():
+            s = getattr(src, "session", None)
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
         return "正在Destroy"
 
 
